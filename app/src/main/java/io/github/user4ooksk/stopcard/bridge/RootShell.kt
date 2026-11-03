@@ -104,22 +104,22 @@ class RootShell {
 
     fun write(path: String, content: String): Boolean {
         require(path != ModuleProtocol.CONFIG) { "Use configuration compare-and-swap" }
-        return writeAtomic(path, content)
+        return writeAtomic(path, content).ok
     }
 
-    fun writeConfiguration(content: String, expected: String?): Boolean {
+    fun writeConfiguration(content: String, expected: String?): Result {
         val digest = expected?.let { java.security.MessageDigest.getInstance("SHA-256")
             .digest(it.toByteArray(Charsets.UTF_8)).joinToString("") { byte -> "%02x".format(byte) } } ?: "absent"
         return writeAtomic(ModuleProtocol.CONFIG, content, digest)
     }
 
-    private fun writeAtomic(path: String, content: String, expected: String? = null): Boolean {
+    private fun writeAtomic(path: String, content: String, expected: String? = null): Result =
+        exec(atomicWriteCommand(path, expected), content)
+
+    internal fun atomicWriteCommand(path: String, expected: String? = null): String {
         val dir = path.substringBeforeLast('/')
         val tmp = "$path.${System.nanoTime()}.tmp"
         val compare = if (expected == null) "" else """
-            exec 9> ${quote("$dir/config.lock")}
-            chmod 0600 ${quote("$dir/config.lock")}
-            flock -n 9 || exit 75
             if test -e ${quote(path)}; then
                 test ! -L ${quote(path)} || exit 74
                 sc_hash=${'$'}(sha256sum ${quote(path)})
@@ -129,22 +129,28 @@ class RootShell {
             fi
             test "${'$'}sc_hash" = ${quote(expected)} || exit 74
         """.trimIndent()
-        val script = """
+        val writer = """
             set -eu
-            sc_dir=${quote(dir)}
             sc_tmp=${quote(tmp)}
             trap 'rm -f "${'$'}sc_tmp"' EXIT
-            mkdir -p "${'$'}sc_dir"
-            chown 0:1000 "${'$'}sc_dir"
-            chmod 0770 "${'$'}sc_dir"
             $compare
             cat > "${'$'}sc_tmp"
             chown 0:1000 "${'$'}sc_tmp"
             chmod 0640 "${'$'}sc_tmp"
-            restorecon "${'$'}sc_dir" "${'$'}sc_tmp" 2>/dev/null || true
+            restorecon ${quote(dir)} "${'$'}sc_tmp" 2>/dev/null || true
             mv -f "${'$'}sc_tmp" ${quote(path)}
         """.trimIndent()
-        return exec(script, content).ok
+        // Let flock open the file instead of relying on shell/tool descriptor inheritance.
+        val write = if (expected == null) writer else
+            "exec flock -n ${quote("$dir/config.lock")} sh -c ${quote(writer)}"
+        return """
+            set -eu
+            umask 077
+            mkdir -p ${quote(dir)}
+            chown 0:1000 ${quote(dir)}
+            chmod 0770 ${quote(dir)}
+            $write
+        """.trimIndent()
     }
 
     fun remove(path: String): Boolean = exec("rm -f ${quote(path)}").ok

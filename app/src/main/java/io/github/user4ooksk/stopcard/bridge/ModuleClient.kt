@@ -140,7 +140,11 @@ class ModuleClient(
                 val expected = if (config.configGeneration > 0) config.configGeneration else preferences.getLong("generation", 0)
                 val next = ModuleProtocol.nextConfig(previous, diskGeneration, confirmed, config.copy(configGeneration = expected))
                 _synchronization.value = Synchronization(true, next.configGeneration)
-                check(root.writeConfiguration(next.toJson(), text)) { "配置写入冲突或文件锁不可用，请重试或重新载入系统配置" }
+                val write = root.writeConfiguration(next.toJson(), text)
+                check(write.ok) {
+                    if (write.code == 74) "系统配置已变化，未覆盖，请重新载入系统配置"
+                    else "配置写入失败（退出码 ${write.code}）：${write.output.trim().take(240).ifBlank { "未取得文件锁或写入未完成，请重试" }}"
+                }
                 check(preferences.edit().putLong("generation", next.configGeneration).commit()) { "记录配置代次失败" }
                 next
             }.getOrElse {
