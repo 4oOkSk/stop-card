@@ -1,0 +1,52 @@
+package io.github.user4ooksk.stopcard.ui
+
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import io.github.user4ooksk.stopcard.AppGraph
+import io.github.user4ooksk.stopcard.graph
+import io.github.user4ooksk.stopcard.model.AppSettings
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+/** Creates a [ViewModel] that gets the app's singletons handed in. */
+@Composable
+inline fun <reified VM : ViewModel> graphViewModel(crossinline create: (AppGraph) -> VM): VM {
+    val graph = LocalContext.current.graph
+    return viewModel(factory = viewModelFactory { initializer { create(graph) } })
+}
+
+/** State shared by every screen: settings and whether card control works. */
+class MainViewModel(private val graph: AppGraph) : ViewModel() {
+    val settings: StateFlow<AppSettings?> = graph.settings.settings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val moduleState = graph.module.state
+
+    val protection: StateFlow<Protection> = combine(
+        graph.settings.settings,
+        graph.module.state,
+        graph.module.synchronization,
+        Protection::of,
+    ).stateIn(viewModelScope, SharingStarted.Eagerly, Protection.Starting)
+
+    fun setProtectionEnabled(enabled: Boolean) {
+        viewModelScope.launch { graph.setProtectionEnabled(enabled) }
+    }
+
+    fun setObserveOnly(observeOnly: Boolean) {
+        viewModelScope.launch { graph.settings.update { it.copy(observeOnly = observeOnly) } }
+    }
+
+    fun refresh() {
+        viewModelScope.launch { graph.module.refresh(forceRoot = true) }
+    }
+}
