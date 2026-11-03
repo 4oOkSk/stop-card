@@ -7,6 +7,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
 
 /** Files are private to root/system. Control reads run on the worker; hooks never access storage. */
 class ModuleStore(private val fault: (String) -> Unit) {
@@ -15,6 +16,8 @@ class ModuleStore(private val fault: (String) -> Unit) {
         { action -> Thread(action, "stop-card-storage").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy())
     private var lastPrune = 0L
+    private val latest = ConcurrentHashMap<String, String>()
+    private val scheduled = ConcurrentHashMap.newKeySet<String>()
 
     fun control(path: String, maxBytes: Int = 256 * 1024): String? {
         val file = File(path)
@@ -49,8 +52,26 @@ class ModuleStore(private val fault: (String) -> Unit) {
         return result
     }
 
-    fun state(json: String) = submit { atomic(File(ModuleProtocol.STATE), json) }
-    fun ready(json: String) = submit { atomic(File("${ModuleProtocol.DIR}/ready.json"), json) }
+    fun state(json: String) = replace(ModuleProtocol.STATE, json)
+    fun ready(json: String) = replace("${ModuleProtocol.DIR}/ready.json", json)
+
+    private fun replace(path: String, text: String) {
+        latest[path] = text
+        if (!scheduled.add(path)) return
+        submit(rejected = { scheduled.remove(path) }) {
+            try { latest.remove(path)?.let { atomic(File(path), it) } }
+            finally {
+                scheduled.remove(path)
+                latest[path]?.let { replace(path, it) }
+            }
+        }
+    }
+
+    fun maintenance(elapsed: Long) {
+        if (elapsed - lastPrune < 60_000) return
+        lastPrune = elapsed
+        submit { prune(File(ModuleProtocol.EVENTS)) }
+    }
 
     fun event(pkg: String, reason: String, detail: String = "") {
         val id = sequence.updateAndGet { maxOf(it + 1, System.currentTimeMillis()) }
@@ -60,21 +81,26 @@ class ModuleStore(private val fault: (String) -> Unit) {
             file.parentFile?.mkdirs()
             file.appendText(event.toJson().toString() + "\n")
             Os.chmod(file.path, 384) // 0600; the controller reads through root.
-            val now = System.currentTimeMillis()
-            if (file.length() > 512 * 1024 || now - lastPrune > 60_000) {
-                lastPrune = now
-                val cutoff = now - TimeUnit.DAYS.toMillis(7)
-                val retained = ArrayDeque<String>()
-                file.useLines { lines -> lines.forEach { line ->
-                    val time = runCatching { org.json.JSONObject(line).getLong("time") }.getOrDefault(0)
-                    if (time >= cutoff) {
-                        retained.addLast(line)
-                        if (retained.size > 800) retained.removeFirst()
-                    }
-                } }
-                atomic(file, retained.joinToString("\n", postfix = if (retained.isEmpty()) "" else "\n"))
-            }
+            if (file.length() > 512 * 1024) prune(file)
         }
+    }
+
+    private fun prune(file: File) {
+        if (!file.exists()) return
+        val cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7)
+        val retained = ArrayDeque<String>()
+        var bytes = 0
+        file.useLines { lines -> lines.forEach { line ->
+            val time = runCatching { org.json.JSONObject(line).getLong("time") }.getOrDefault(0)
+            if (time >= cutoff) {
+                retained.addLast(line)
+                bytes += line.toByteArray(Charsets.UTF_8).size + 1
+                while (retained.size > 800 || bytes > 512 * 1024) {
+                    bytes -= retained.removeFirst().toByteArray(Charsets.UTF_8).size + 1
+                }
+            }
+        } }
+        atomic(file, retained.joinToString("\n", postfix = if (retained.isEmpty()) "" else "\n"))
     }
 
     fun clearEvents(done: (Boolean) -> Unit) = submit(rejected = { done(false) }) {
@@ -90,10 +116,12 @@ class ModuleStore(private val fault: (String) -> Unit) {
 
     private fun atomic(file: File, text: String) {
         file.parentFile?.mkdirs()
-        val tmp = File(file.path + ".module.tmp")
-        tmp.outputStream().use { output -> output.write(text.toByteArray(Charsets.UTF_8)); output.fd.sync() }
-        Os.chmod(tmp.path, 384)
-        Os.rename(tmp.path, file.path)
+        val tmp = File(file.parentFile, ".${file.name}.${java.util.UUID.randomUUID()}.tmp")
+        val descriptor = Os.open(tmp.path, OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW, 384)
+        try {
+            java.io.FileOutputStream(descriptor).use { output -> output.write(text.toByteArray(Charsets.UTF_8)); output.fd.sync() }
+            Os.rename(tmp.path, file.path)
+        } finally { tmp.delete() }
     }
 
     private fun submit(rejected: () -> Unit = {}, action: () -> Unit) {

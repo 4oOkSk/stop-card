@@ -43,6 +43,13 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
         viewModelScope.launch { graph.module.refresh(forceRoot = true) }
     }
 
+    fun reloadConfiguration() {
+        viewModelScope.launch {
+            maintenance.value = runCatching { graph.sync.reload(); "已重新载入系统配置" }
+                .getOrElse { it.message ?: "读取系统配置失败" }
+        }
+    }
+
     fun diagnostics(onResult: (String) -> Unit) {
         viewModelScope.launch {
             onResult(graph.module.diagnostics())

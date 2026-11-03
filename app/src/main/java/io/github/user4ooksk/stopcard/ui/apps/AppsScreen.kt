@@ -69,7 +69,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.R
-import io.github.user4ooksk.stopcard.data.SystemRoles
 import io.github.user4ooksk.stopcard.model.RuleMode
 import io.github.user4ooksk.stopcard.ui.apps.AppsViewModel.Filter
 import io.github.user4ooksk.stopcard.ui.components.AppIcon
@@ -324,7 +323,7 @@ private fun AppRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
-                if (!item.app.isUserFacing) {
+                if (item.app.isSystem) {
                     Spacer(Modifier.width(8.dp))
                     Badge(stringResource(R.string.app_system_badge))
                 }

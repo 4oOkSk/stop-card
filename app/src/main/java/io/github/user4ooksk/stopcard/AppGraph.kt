@@ -11,7 +11,6 @@ import io.github.user4ooksk.stopcard.data.EventsRepository
 import io.github.user4ooksk.stopcard.data.InstalledApps
 import io.github.user4ooksk.stopcard.data.RulesRepository
 import io.github.user4ooksk.stopcard.data.SettingsRepository
-import io.github.user4ooksk.stopcard.data.SystemRoles
 import io.github.user4ooksk.stopcard.data.db.StopDatabase
 import io.github.user4ooksk.stopcard.module.SystemFacts
 import io.github.user4ooksk.stopcard.model.RuleMode
@@ -19,7 +18,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /** Process-wide singletons. Created once in [StopApp]. */
@@ -33,11 +31,7 @@ class AppGraph(val context: Context) {
     val events = EventsRepository(context, database.events())
     val apps = InstalledApps(context)
     val icons = AppIcons(context)
-    val roles = SystemRoles(context)
     val module = ModuleClient(context, scope)
-
-    /** Bumped when the app comes to the foreground, so role-based exceptions are re-read. */
-    val rolesChanged = MutableStateFlow(0)
 
     @Volatile
     private var foreground = false
@@ -48,9 +42,7 @@ class AppGraph(val context: Context) {
         settings = settings,
         rules = rules,
         apps = apps,
-        roles = roles,
         module = module,
-        rolesChanged = rolesChanged,
         selfPackage = context.packageName,
     )
 
@@ -65,20 +57,11 @@ class AppGraph(val context: Context) {
         }
         scope.launch { events.prune() }
         scope.launch { backgroundSync() }
-        scope.launch {
-            // Dynamic roles (VPN, IME, accessibility, alarms) can change while the UI is away.
-            // A low-rate refresh keeps the module's exception set from becoming stale.
-            while (true) {
-                delay(ROLE_REFRESH_MS)
-                rolesChanged.value++
-            }
-        }
         ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     foreground = true
                     module.setActive(true)
-                    rolesChanged.value++
                     scope.launch { apps.refresh() }
                 }
                 Lifecycle.Event.ON_STOP -> {
@@ -120,7 +103,6 @@ class AppGraph(val context: Context) {
 
     private companion object {
         const val EVENT_SYNC_MS = 10_000L
-        const val ROLE_REFRESH_MS = 60_000L
     }
 }
 

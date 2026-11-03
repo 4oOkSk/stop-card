@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "StopCard"
 
 include(":app")
+include(":testbed")

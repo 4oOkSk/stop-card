@@ -53,7 +53,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.R
-import io.github.user4ooksk.stopcard.data.SystemRoles
 import io.github.user4ooksk.stopcard.graph
 import io.github.user4ooksk.stopcard.ui.reasonLabel
 import io.github.user4ooksk.stopcard.ui.relativeTime
@@ -100,8 +99,7 @@ fun AppDetailSheet(
             Spacer(Modifier.height(24.dp))
 
             if (item.isProtected) {
-                val reason = item.integration?.takeIf { it.keepsRunning }?.let { integrationText(it) }
-                Notice(Icons.Rounded.Shield, item.reasons.takeIf { it.isNotEmpty() }?.joinToString("、") { io.github.user4ooksk.stopcard.ui.reasonLabel(it) } ?: reason ?: stringResource(R.string.detail_protected))
+                Notice(Icons.Rounded.Shield, item.reasons.takeIf { it.isNotEmpty() }?.joinToString("、") { io.github.user4ooksk.stopcard.ui.reasonLabel(it) } ?: stringResource(R.string.detail_protected))
             } else {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
@@ -125,10 +123,6 @@ fun AppDetailSheet(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                item.integration?.let { integration ->
-                    Spacer(Modifier.height(16.dp))
-                    Notice(Icons.Rounded.WarningAmber, integrationText(integration), warning = true)
-                }
             }
 
             Spacer(Modifier.height(24.dp))
@@ -232,15 +226,3 @@ private fun Notice(icon: ImageVector, text: String, warning: Boolean = false) {
         }
     }
 }
-
-@Composable
-private fun integrationText(integration: SystemRoles.Integration): String = stringResource(
-    when (integration) {
-        SystemRoles.Integration.ACCESSIBILITY -> R.string.detail_integration_accessibility
-        SystemRoles.Integration.NOTIFICATION_LISTENER -> R.string.detail_integration_notification_listener
-        SystemRoles.Integration.DEVICE_ADMIN -> R.string.detail_integration_device_admin
-        SystemRoles.Integration.AUTOFILL -> R.string.detail_integration_autofill
-        SystemRoles.Integration.ALARM_CLOCK -> R.string.detail_integration_alarm_clock
-        SystemRoles.Integration.WALLPAPER -> R.string.detail_integration_wallpaper
-    }
-)

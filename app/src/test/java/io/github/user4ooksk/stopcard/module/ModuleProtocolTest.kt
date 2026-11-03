@@ -6,10 +6,30 @@ import io.github.user4ooksk.stopcard.policy.AppKey
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ModuleProtocolTest {
+
+    @Test
+    fun `large status retains health metadata and explicitly marks omitted details`() {
+        val state = ModuleProtocol.ModuleState(
+            versionCode = 2, bootId = "boot", heartbeatElapsed = 100, pid = 10, uid = 1000,
+            configGeneration = 7, configLoaded = true, ready = true, observeOnly = true,
+            apps = (0..511).map { RunningApp("example." + "a".repeat(180) + it, state = "operation") },
+            diagnosticDetails = (0..100).associate { "method$it" to "细节".repeat(4096) },
+            flows = (0..127).map { "flow$it:" + "参与者".repeat(1000) },
+        )
+        val text = state.toTransportJson(32 * 1024)
+        assertTrue(text.toByteArray(Charsets.UTF_8).size <= 32 * 1024)
+        val parsed = ModuleProtocol.ModuleState.fromJson(text)!!
+        assertEquals("boot", parsed.bootId)
+        assertEquals(7L, parsed.configGeneration)
+        assertTrue(parsed.ready && parsed.observeOnly)
+        assertTrue(parsed.diagnosticDetails.containsKey("truncated_state"))
+    }
 
     @Test
     fun `config round-trips`() {
@@ -18,7 +38,6 @@ class ModuleProtocolTest {
             observeOnly = false,
             reviewMs = 1_500,
             recentVisibleMs = 30_000,
-            clearNotifications = true,
             userId = 0,
             configGeneration = 42,
             exceptions = setOf("com.example.a", "com.example.b"),
@@ -81,6 +100,7 @@ class ModuleProtocolTest {
             configGeneration = 1,
             expiresAt = System.currentTimeMillis() + 10_000,
             stop = listOf("com.example.a"),
+            identities = setOf(AppKey(0, "com.example.a", 10001, 1, "a".repeat(64))),
             stopAll = false,
         )
         assertEquals(command, ModuleProtocol.Command.fromJson(command.toJson()))
@@ -129,12 +149,24 @@ class ModuleProtocolTest {
     }
 
     @Test fun `changed settings follow the latest durable generation even after clock reversal`() {
-        val changed = config().copy(observeOnly = false, configGeneration = 0)
+        val changed = config().copy(observeOnly = false, configGeneration = 500)
         assertEquals(501L, ModuleProtocol.nextConfig(config().copy(configGeneration = 500), 500, 300, changed).configGeneration)
     }
 
-    @Test fun `a rolled back matching document cannot downgrade an acknowledged generation`() {
-        assertEquals(201L, ModuleProtocol.nextConfig(config(), 10, 200, config()).configGeneration)
+    @Test(expected = IllegalArgumentException::class) fun `a stale reconnect cannot overwrite a newer acknowledged configuration`() {
+        ModuleProtocol.nextConfig(config(), 10, 200, config())
+    }
+
+    @Test(expected = IllegalArgumentException::class) fun `a stale local setting cannot replace a newer durable setting`() {
+        ModuleProtocol.nextConfig(config().copy(configGeneration = 500), 500, 300, config().copy(observeOnly = false))
+    }
+
+    @Test fun `manual commands bind the complete installation identity`() {
+        val key = AppKey(0, "example.app", 10001, 10, "a".repeat(64))
+        val command = ModuleProtocol.Command(1, 10, 1000, stop = listOf(key.packageName), identities = setOf(key))
+        assertEquals(command, ModuleProtocol.Command.fromJson(command.toJson()))
+        assertNull(ModuleProtocol.Command.fromJson(command.copy(identities = emptySet()).toJson()))
+        assertNotEquals(key, ModuleProtocol.Command.fromJson(command.copy(identities = setOf(key.copy(installedAt = 11))).toJson())!!.identities.single())
     }
 
     @Test(expected = IllegalArgumentException::class)

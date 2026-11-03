@@ -218,39 +218,15 @@ private fun StatTile(value: Int, label: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun UndecidedRow(packageName: String, label: String, onBlock: () -> Unit, onAllow: () -> Unit) {
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            AppIcon(packageName, size = 40.dp)
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    stringResource(R.string.home_new_app),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(start = 56.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilledTonalButton(onClick = onBlock) { Text(stringResource(R.string.action_stop_in_background)) }
-            OutlinedButton(onClick = onAllow) { Text(stringResource(R.string.action_let_it_run)) }
-        }
-    }
-}
-
-@Composable
 private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> Unit) {
     val status = when {
         running.inUse -> stringResource(R.string.running_in_use)
         running.stopsAt != null && running.stopsAt > now -> stringResource(R.string.running_stops_in, countdownLabel(running.stopsAt - now))
         running.stopsAt != null -> stringResource(R.string.running_stopping)
         running.cards > 0 -> "有 ${running.cards} 张卡"
+        running.state == "operation" -> "操作、结果或绑定尚未结束"
+        running.state == "opening" -> "正在打开，等待确认"
+        running.state == "uncertain" -> "任务来源待确认"
         else -> stringResource(R.string.running_in_use)
     }
     ListItem(
@@ -263,7 +239,7 @@ private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> 
             Text(status, color = if (running.inUse) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
         },
         trailingContent = {
-            IconButton(onClick = onStop) {
+            IconButton(onClick = onStop, enabled = !running.inUse && running.state !in setOf("operation", "opening", "uncertain")) {
                 Icon(Icons.Rounded.Block, contentDescription = stringResource(R.string.action_stop_now))
             }
         },
@@ -286,5 +262,3 @@ private fun EmptyRow(text: String, icon: ImageVector = Icons.Rounded.CheckCircle
         Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
-
-private const val MAX_UNDECIDED = 3

@@ -33,11 +33,8 @@ sealed interface Protection {
                 sync.error != null -> Degraded(sync.error)
                 sync.pending -> Starting
                 !settings.protectionEnabled -> Starting
-                !module.module.ready -> Degraded(module.module.lastError ?: "任务、窗口或必要入口尚未就绪，正在观察")
-                module.module.recovery != "watching" -> Degraded("独立恢复监测未就绪，正在观察。请到设置安装或检查恢复辅助。")
+                !module.module.ready -> Degraded(module.module.lastError ?: "最近任务或系统强停接口尚未就绪")
                 module.module.observeOnly -> Observe
-                module.module.notificationControl != "installed" || module.module.wakeControl != "installed" ->
-                    Degraded("部分通知或后台入口未挂接。已挂接入口继续工作，缺失项见设置中的能力状态。")
                 else -> Active
             }
         }

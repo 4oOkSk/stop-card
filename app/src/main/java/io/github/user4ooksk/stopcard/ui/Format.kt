@@ -42,7 +42,7 @@ fun reasonLabel(reason: StopReason): String = when (reason) {
     StopReason.BOOT -> "开机重建状态"
     StopReason.ERROR -> "状态或执行错误"
     StopReason.REVIEW -> "等待复核"
-    StopReason.BLOCKED -> "受保护，未停止"
+    StopReason.BLOCKED -> "已拦截或未执行"
     StopReason.CANCELED -> "复核取消"
     StopReason.WOKE -> "后台自启"
     StopReason.LEFT -> "离开后台后停止"

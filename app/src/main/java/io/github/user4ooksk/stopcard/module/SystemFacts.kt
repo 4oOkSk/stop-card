@@ -21,7 +21,7 @@ data class SystemFactSnapshot(
     val apps: Map<String, AppKey>,
     val groups: Map<Int, Set<String>>,
     val essential: Map<String, Set<String>>,
-    val providers: Map<String, Pair<String, Int>>,
+    val providers: Map<String, Triple<String, Int, String>>,
     val launcherUids: Set<Int>,
     val systemUiUid: Int,
 )
@@ -49,6 +49,8 @@ class SystemFacts(private val context: Context) {
         for (pkg in packages) if (((pkg.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0) protect(pkg.packageName, "system_package")
         for (pkg in ROOT_PACKAGES) protect(pkg, "root_manager")
         protect("io.github.user4ooksk.stopcard", "controller")
+        for (pkg in listOf("com.google.android.gms", "com.google.android.gsf", "com.android.vending")) if (pkg in apps) protect(pkg, "google_service")
+        protect(android.webkit.WebView.getCurrentWebViewPackage()?.packageName, "webview")
         val roles = context.getSystemService(RoleManager::class.java) ?: error("Role service unavailable")
         for ((role, reason) in listOf(RoleManager.ROLE_HOME to "launcher", RoleManager.ROLE_DIALER to "dialer", RoleManager.ROLE_SMS to "sms", RoleManager.ROLE_ASSISTANT to "assistant")) {
             if (roles.isRoleAvailable(role)) {
@@ -82,12 +84,18 @@ class SystemFacts(private val context: Context) {
             val owners = pm.getPackagesForUid(uid) ?: error("Unknown VPN package")
             owners.forEach { protect(it, "vpn") }
         }
-        val authorities = HashMap<String, Pair<String, Int>>()
+        // Entry denial must not partially restrict a process shared with an essential component.
+        for (group in apps.values.groupBy { it.uid }.values) {
+            val inherited = group.flatMap { reasons[it.packageName].orEmpty() }.toSet()
+            if (inherited.isNotEmpty()) for (app in group) inherited.forEach { protect(app.packageName, it) }
+        }
+        val authorities = HashMap<String, Triple<String, Int, String>>()
         packages.forEach { pkg ->
             pkg.providers.orEmpty().forEach { provider ->
                 val app = apps[provider.packageName] ?: return@forEach
                 val names = android.content.pm.ProviderInfo::class.java.getField("auth" + "ority").get(provider) as? String
-                names.orEmpty().split(';').filter { it.isNotBlank() }.forEach { authorities[it] = app.packageName to app.uid }
+                val component = ComponentName(provider.packageName, provider.name).flattenToString()
+                names.orEmpty().split(';').filter { it.isNotBlank() }.forEach { authorities[it] = Triple(app.packageName, app.uid, component) }
             }
         }
         val homes = reasons.filterValues { "launcher" in it }.keys.mapNotNull { apps[it]?.uid }.toSet()

@@ -12,6 +12,7 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Upsert
+import androidx.room.Transaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
@@ -61,6 +62,15 @@ interface RuleDao {
 
     @Query("DELETE FROM rules WHERE packageName IN (:packageNames)")
     suspend fun delete(packageNames: List<String>)
+
+    @Query("DELETE FROM rules")
+    suspend fun deleteAll()
+
+    @Transaction
+    suspend fun replaceAll(rules: List<RuleEntity>) {
+        deleteAll()
+        upsert(rules)
+    }
 }
 
 @Dao

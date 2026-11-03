@@ -1,0 +1,25 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <queries>
+        <package android:name="io.github.user4ooksk.stopcard.test.a" />
+        <package android:name="io.github.user4ooksk.stopcard.test.b" />
+        <package android:name="io.github.user4ooksk.stopcard.test.c" />
+    </queries>
+    <application android:label="${probeLabel}" android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false" android:resizeableActivity="true">
+        <activity android:name=".ProbeActivity" android:exported="true" android:supportsPictureInPicture="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".ProbeActivity$Flow" android:exported="true" />
+        <service android:name=".ProbeActivity$ProbeService" android:exported="true" />
+        <service android:name=".ProbeActivity$ForegroundProbe" android:exported="true" android:foregroundServiceType="dataSync" />
+        <service android:name=".ProbeActivity$ProbeJob" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <receiver android:name=".ProbeActivity$ProbeReceiver" android:exported="true" />
+        <provider android:name=".ProbeActivity$ProbeProvider" android:authorities="${applicationId}.probe" android:exported="true" />
+    </application>
+</manifest>

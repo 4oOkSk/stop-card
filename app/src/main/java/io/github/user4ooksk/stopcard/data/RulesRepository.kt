@@ -44,14 +44,14 @@ class RulesRepository(private val dao: RuleDao, private val identity: (String) -
         decide(listOf(packageName), if (allowed) RuleMode.ALLOW else RuleMode.BLOCK)
     }
 
-    /** Kept for the reused detail sheet; the card rule has no per-app grace period. */
-    suspend fun setGrace(packageName: String, graceSeconds: Int?) {
-        val rule = dao.get(packageName) ?: return
-        dao.upsert(listOf(rule.copy(graceSeconds = graceSeconds, updatedAt = System.currentTimeMillis())))
-    }
-
     suspend fun delete(packageNames: Collection<String>) {
         if (packageNames.isNotEmpty()) dao.delete(packageNames.toList())
+    }
+
+    suspend fun restoreExceptions(apps: Set<AppKey>) {
+        val valid = withContext(Dispatchers.IO) { apps.filter { identity(it.packageName) == it } }
+        dao.replaceAll(valid.map { app -> RuleEntity(app.packageName, RuleMode.ALLOW.name, true, null, System.currentTimeMillis(),
+            app.userId, app.uid, app.installedAt, app.signer) })
     }
 
     private fun RuleEntity.toModel() = AppRule(

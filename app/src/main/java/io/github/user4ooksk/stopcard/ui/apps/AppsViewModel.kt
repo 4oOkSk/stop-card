@@ -4,14 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.user4ooksk.stopcard.AppGraph
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
-import io.github.user4ooksk.stopcard.data.SystemRoles
 import io.github.user4ooksk.stopcard.data.db.PackageCount
 import io.github.user4ooksk.stopcard.model.AppRule
 import io.github.user4ooksk.stopcard.model.InstalledApp
 import io.github.user4ooksk.stopcard.model.RuleMode
 import io.github.user4ooksk.stopcard.ui.daysBefore
 import io.github.user4ooksk.stopcard.ui.dayStarts
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -19,8 +17,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -32,7 +28,6 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         val app: InstalledApp,
         val rule: AppRule?,
         val isProtected: Boolean,
-        val integration: SystemRoles.Integration?,
         val stopsToday: Int,
         val cards: Int = 0,
         val visible: Boolean = false,
@@ -42,7 +37,6 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         /** True when the global rule applies; an ALLOW row or a system role exempts it. */
         val managed: Boolean get() = !isProtected && rule?.exempt != true
         val exempt: Boolean get() = !isProtected && rule?.exempt == true
-        val isNew: Boolean get() = false
     }
 
     data class State(
@@ -52,23 +46,16 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         val all: Map<String, Item> = emptyMap(),
         val counts: Map<Filter, Int> = emptyMap(),
         val showSystem: Boolean = false,
-        val defaultGraceSeconds: Int = 0,
     )
-
-    private data class Roles(val protected: Set<String>, val integrations: Map<String, SystemRoles.Integration>)
 
     val query = MutableStateFlow("")
     val filter = MutableStateFlow(Filter.ALL)
 
-    private val roles = combine(graph.apps.apps.filterNotNull(), graph.rolesChanged) { _, _ -> }
-        .map { Roles(graph.roles.protectedPackages(), graph.roles.integrations()) }
-        .flowOn(Dispatchers.IO)
-
     @OptIn(ExperimentalCoroutinesApi::class)
     private val countsToday = dayStarts().flatMapLatest { graph.events.countsSince(it) }
 
-    private val base = combine(graph.apps.apps.filterNotNull(), graph.rules.rules, roles) { apps, rules, roles ->
-        Triple(apps, rules, roles)
+    private val base = combine(graph.apps.apps.filterNotNull(), graph.rules.rules) { apps, rules ->
+        apps to rules
     }
     private val extra = combine(countsToday, graph.settings.settings, graph.module.state) { counts, settings, module ->
         Triple(counts, settings, module)
@@ -79,13 +66,13 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         extra,
         query,
         filter,
-    ) { (apps, rules, roles), (counts, settings, module), query, filter ->
+    ) { (apps, rules), (counts, settings, module), query, filter ->
         val moduleApps = (module as? ModuleClient.State.Connected)?.module?.apps.orEmpty().associateBy { it.packageName }
         val essential = (module as? ModuleClient.State.Connected)?.module?.essentialReasons.orEmpty()
         val all = apps.values
             .filter { it.packageName != graph.context.packageName }
-            .filter { settings.showSystemApps || it.isUserFacing || rules[it.packageName]?.exempt == true }
-            .map { app -> item(app, rules, roles, counts, moduleApps, essential) }
+            .filter { settings.showSystemApps || !it.isSystem || rules[it.packageName]?.exempt == true }
+            .map { app -> item(app, rules, counts, moduleApps, essential) }
         val matching = if (query.isBlank()) all else {
             val q = query.trim()
             all.filter { it.app.label.contains(q, ignoreCase = true) || it.app.packageName.contains(q, ignoreCase = true) }
@@ -97,12 +84,8 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
                 .sortedWith(compareByDescending<Item> { it.cards > 0 }.thenBy { it.app.label.lowercase() }),
             counts = Filter.entries.associateWith { f -> matching.count { it.matches(f) } },
             showSystem = settings.showSystemApps,
-            defaultGraceSeconds = 0,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), State())
-
-    /** Kept for the reused switch: on means "exception", off means "global card rule". */
-    fun setBlocked(packageName: String, blocked: Boolean) = setAllowed(packageName, !blocked)
 
     fun setAllowed(packageName: String, allowed: Boolean) {
         viewModelScope.launch { graph.rules.setAllowed(packageName, allowed) }
@@ -110,10 +93,6 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun decide(packageNames: List<String>, mode: RuleMode) {
         viewModelScope.launch { graph.decide(packageNames, mode) }
-    }
-
-    fun setGrace(packageName: String, seconds: Int?) {
-        // The card rule has no per-app grace period; retained for the old detail sheet.
     }
 
     fun setShowSystem(show: Boolean) {
@@ -131,7 +110,6 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     private fun item(
         app: InstalledApp,
         rules: Map<String, AppRule>,
-        roles: Roles,
         counts: Map<String, PackageCount>,
         moduleApps: Map<String, io.github.user4ooksk.stopcard.model.RunningApp>,
         essential: Map<String, Set<String>>,
@@ -140,8 +118,7 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         return Item(
             app = app,
             rule = rules[app.packageName]?.takeIf { it.identity == app.identity && app.identity != null },
-            isProtected = app.isSystem || essential[app.packageName]?.isNotEmpty() == true || app.packageName in roles.protected,
-            integration = roles.integrations[app.packageName],
+            isProtected = app.isSystem || essential[app.packageName]?.isNotEmpty() == true,
             stopsToday = counts[app.packageName]?.count ?: 0,
             cards = module?.cards ?: 0,
             visible = module?.visible ?: false,

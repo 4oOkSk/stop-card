@@ -89,7 +89,7 @@ private fun Welcome() {
         style = MaterialTheme.typography.bodyLarge,
     )
     Text(
-        "支付、登录验证、分享和相机等操作按页面、回调和服务绑定保护，完成后再复核。系统电话、桌面、输入法、VPN 等必要组件默认放开。",
+        "跨应用操作按可见窗口、页面和服务生命周期临时保护，隐藏后使用短超时兜底。系统电话、桌面、输入法、VPN 等必要组件默认放开。",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -111,7 +111,7 @@ private fun Setup(module: ModuleClient.State, rootAvailable: Boolean, onRefresh:
             Text("2. 作用域只勾选“系统框架”。", style = MaterialTheme.typography.bodyMedium)
             Text("3. 重启手机。", style = MaterialTheme.typography.bodyMedium)
             Text("4. 在 KernelSU 中给 Stop Card 授予 Root；界面通过 Root 读取模块状态。", style = MaterialTheme.typography.bodyMedium)
-            Text("5. 完成引导后，在设置安装独立恢复辅助。监测未就绪时模块只观察。", style = MaterialTheme.typography.bodyMedium)
+            Text("5. 可在设置中安装独立恢复辅助；核心卡片规则不依赖其心跳。", style = MaterialTheme.typography.bodyMedium)
         }
     }
     StatusRow("Root", rootAvailable, if (rootAvailable) "已授权" else "未授权或不可用")

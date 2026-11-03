@@ -28,6 +28,7 @@ object ModuleProtocol {
     /** Generation order comes from the persisted control document, never from the wall clock. */
     fun nextConfig(previous: Config?, diskGeneration: Long, confirmed: Long, desired: Config): Config {
         if (previous != null && previous.copy(configGeneration = 0) == desired.copy(configGeneration = 0) && diskGeneration >= confirmed) return previous
+        require(diskGeneration <= desired.configGeneration && confirmed <= desired.configGeneration) { "系统配置已更新，请先重新载入系统配置" }
         val latest = maxOf(0, diskGeneration, confirmed, desired.configGeneration)
         require(latest < Long.MAX_VALUE) { "Configuration generation exhausted" }
         return desired.copy(configGeneration = latest + 1)
@@ -45,7 +46,6 @@ object ModuleProtocol {
         val observeOnly: Boolean = true,
         val reviewMs: Long = 500,
         val recentVisibleMs: Long = 30_000,
-        val clearNotifications: Boolean = true,
         val extraKeepAlive: Boolean = false,
         val userId: Int = 0,
         val configGeneration: Long = 0,
@@ -60,7 +60,6 @@ object ModuleProtocol {
             put("observeOnly", observeOnly)
             put("reviewMs", reviewMs)
             put("recentVisibleMs", recentVisibleMs)
-            put("clearNotifications", clearNotifications)
             put("extraKeepAlive", extraKeepAlive)
             put("userId", userId)
             put("configGeneration", configGeneration)
@@ -78,7 +77,6 @@ object ModuleProtocol {
                 if (o.get("observeOnly") !is Boolean) return null
                 if (o.get("reviewMs") !is Int && o.get("reviewMs") !is Long) return null
                 if (o.get("recentVisibleMs") !is Int && o.get("recentVisibleMs") !is Long) return null
-                if (o.get("clearNotifications") !is Boolean) return null
                 if (o.get("extraKeepAlive") !is Boolean) return null
                 if (o.get("userId") !is Int || o.getInt("userId") != 0) return null
                 val generation = o.get("configGeneration")
@@ -101,7 +99,6 @@ object ModuleProtocol {
                     observeOnly = o.getBoolean("observeOnly"),
                     reviewMs = o.getLong("reviewMs").coerceIn(200, 30_000),
                     recentVisibleMs = o.getLong("recentVisibleMs").coerceIn(0, 10 * 60_000),
-                    clearNotifications = o.getBoolean("clearNotifications"),
                     extraKeepAlive = o.getBoolean("extraKeepAlive"),
                     userId = 0,
                     configGeneration = o.getLong("configGeneration"),
@@ -137,6 +134,7 @@ object ModuleProtocol {
         val taskSource: String = "unknown",
         val configGeneration: Long = 0,
         val configLoaded: Boolean = false,
+        val appliedGeneration: Long = -1,
         val observeOnly: Boolean = false,
         val paused: Boolean = false,
         val lastError: String? = null,
@@ -160,6 +158,37 @@ object ModuleProtocol {
         val extraKeepAlive: Boolean = false,
         val diagnosticDetails: Map<String, String> = emptyMap(),
     ) {
+        /** Keep one atomic status document below the bounded root reader's output limit. */
+        fun toTransportJson(maxBytes: Int = 192 * 1024): String {
+            require(maxBytes in 16 * 1024..192 * 1024)
+            val full = toJson()
+            if (full.toByteArray(Charsets.UTF_8).size <= maxBytes) return full
+            val totals = "apps=${apps.size}; cards=${cards.size}; flows=${flows.size}; roles=${essentialReasons.size}"
+            var compact = copy(
+                lastError = lastError?.take(256),
+                hooks = hooks.entries.take(64).associate { it.key to it.value.take(128) },
+                diagnosticDetails = diagnosticDetails.entries.take(8).associate { it.key to it.value.take(256) } +
+                    ("truncated_state" to "Lists and method details shortened; $totals"),
+                commandResults = commandResults.entries.toList().takeLast(4).associate { it.key to it.value.take(512) },
+            )
+            while (true) {
+                val text = compact.toJson()
+                if (text.toByteArray(Charsets.UTF_8).size <= maxBytes) return text
+                if (compact.apps.isEmpty() && compact.cards.isEmpty() && compact.flows.isEmpty() && compact.essentialReasons.isEmpty()) {
+                    return compact.copy(hooks = emptyMap(), commandResults = emptyMap(),
+                        diagnosticDetails = mapOf("truncated_state" to totals)).toJson().also {
+                        check(it.toByteArray(Charsets.UTF_8).size <= maxBytes) { "Status header exceeds transport limit" }
+                    }
+                }
+                compact = compact.copy(
+                    apps = compact.apps.take(compact.apps.size / 2),
+                    cards = compact.cards.take(compact.cards.size / 2),
+                    flows = compact.flows.take(compact.flows.size / 2),
+                    essentialReasons = compact.essentialReasons.entries.take(compact.essentialReasons.size / 2).associate { it.key to it.value },
+                )
+            }
+        }
+
         fun toJson(): String = JSONObject().apply {
             put("protocol", protocol)
             put("versionCode", versionCode)
@@ -168,6 +197,7 @@ object ModuleProtocol {
             put("startedAt", startedAt)
             put("taskSource", taskSource)
             put("configGeneration", configGeneration)
+            put("appliedGeneration", appliedGeneration)
             put("configLoaded", configLoaded)
             put("observeOnly", observeOnly)
             put("paused", paused)
@@ -189,6 +219,7 @@ object ModuleProtocol {
                         app.reason?.let { put("reason", it) }
                         put("state", app.state)
                         put("recentlyVisible", app.recentlyVisible)
+                        put("running", app.running)
                     })
                 }
             })
@@ -222,6 +253,7 @@ object ModuleProtocol {
                     startedAt = o.optLong("startedAt", 0),
                     taskSource = o.optString("taskSource", "unknown"),
                     configGeneration = o.optLong("configGeneration", 0),
+                    appliedGeneration = o.optLong("appliedGeneration", -1),
                     configLoaded = o.optBoolean("configLoaded", false),
                     observeOnly = o.optBoolean("observeOnly", false),
                     paused = o.optBoolean("paused", false),
@@ -287,6 +319,7 @@ object ModuleProtocol {
         val stop: List<String> = emptyList(),
         val stopAll: Boolean = false,
         val clearLog: Boolean = false,
+        val identities: Set<AppKey> = emptySet(),
     ) {
         fun toJson(): String = JSONObject().apply {
             put("protocol", VERSION)
@@ -296,6 +329,7 @@ object ModuleProtocol {
             put("stop", JSONArray(stop))
             put("stopAll", stopAll)
             put("clearLog", clearLog)
+            put("identities", JSONArray().apply { identities.forEach { put(it.toJson()) } })
         }.toString()
 
         companion object {
@@ -312,6 +346,12 @@ object ModuleProtocol {
                 if (o.get("stop") !is JSONArray) return null
                 val stop = o.getJSONArray("stop").strictStringList() ?: return null
                 if (stop.size > 512 || stop.any { !PACKAGE_NAME.matches(it) }) return null
+                val identities = o.getJSONArray("identities").let { array ->
+                    require(array.length() <= 512)
+                    (0 until array.length()).map { appKey(array.getJSONObject(it)) }.toSet()
+                }
+                if (identities.map { it.packageName }.toSet().size != identities.size ||
+                    stop.any { pkg -> identities.none { it.packageName == pkg } }) return null
                 if (o.get("clearLog") !is Boolean) return null
                 if (o.getBoolean("clearLog") && (stop.isNotEmpty() || o.getBoolean("stopAll"))) return null
                 Command(
@@ -321,6 +361,7 @@ object ModuleProtocol {
                     stop = stop,
                     stopAll = o.getBoolean("stopAll"),
                     clearLog = o.getBoolean("clearLog"),
+                    identities = identities,
                 )
             }.getOrNull()
         }
@@ -394,6 +435,7 @@ object ModuleProtocol {
                     reason = o.optString("reason").takeIf { it.isNotBlank() },
                     state = o.optString("state", "managed"),
                     recentlyVisible = o.optBoolean("recentlyVisible", false),
+                    running = o.optBoolean("running", false),
                 )
             }.getOrNull()
         }

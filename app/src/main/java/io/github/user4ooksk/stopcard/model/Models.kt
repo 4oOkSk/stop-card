@@ -48,18 +48,11 @@ data class AppSettings(
     val reviewMs: Long = 500,
     /** Review delay for a hidden app without a card. Active flows use completion conditions. */
     val recentVisibleSeconds: Int = 30,
-    val clearNotifications: Boolean = true,
     /** Optional cached process priority adjustment. Disabled by default. */
     val extraKeepAlive: Boolean = false,
     val showSystemApps: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = false,
-    // Legacy fields kept so the reused settings database and older screens compile.
-    val graceSeconds: Int = 0,
-    val allowOngoing: Boolean = false,
-    val askOnInstall: Boolean = false,
-    val newAppMode: RuleMode = RuleMode.BLOCK,
-    val extraRestrictions: Boolean = false,
 )
 
 /** Why the module recorded an event. */
@@ -132,6 +125,7 @@ data class RunningApp(
     val reason: String? = null,
     val state: String = "managed",
     val recentlyVisible: Boolean = false,
+    val running: Boolean = false,
 ) {
     // Names used by the reused home screen.
     val inUse: Boolean get() = visible

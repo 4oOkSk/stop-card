@@ -6,9 +6,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.user4ooksk.stopcard.AppGraph
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
 import io.github.user4ooksk.stopcard.model.InstalledApp
-import io.github.user4ooksk.stopcard.model.RuleMode
 import io.github.user4ooksk.stopcard.model.StopEvent
-import io.github.user4ooksk.stopcard.model.StopReason
 import io.github.user4ooksk.stopcard.model.isStop
 import io.github.user4ooksk.stopcard.ui.dayStarts
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -38,9 +36,6 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
         val loading: Boolean = true,
         val blockedCount: Int = 0,
         val stopsToday: Int = 0,
-        val wakeUpsToday: Int = 0,
-        val undecided: List<InstalledApp> = emptyList(),
-        val newAppMode: RuleMode = RuleMode.BLOCK,
         val running: List<Running> = emptyList(),
         val recent: List<Recent> = emptyList(),
         val cards: Int = 0,
@@ -68,7 +63,7 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
         val polledAt = SystemClock.elapsedRealtime()
         val moduleApps = (module as? ModuleClient.State.Connected)?.module?.apps.orEmpty()
         val running = moduleApps
-            .filter { it.cards > 0 || it.visible || it.stopInMs >= 0 || it.state == "operation" }
+            .filter { it.running }
             .map { app ->
                 Running(
                     app = apps[app.packageName],
@@ -83,11 +78,9 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
         State(
             loading = false,
             blockedCount = apps.values.count {
-                it.isUserFacing && !(rules[it.packageName]?.exempt == true && rules[it.packageName]?.identity == it.identity)
+                !it.isSystem && it.packageName != graph.context.packageName && !(rules[it.packageName]?.exempt == true && rules[it.packageName]?.identity == it.identity)
             },
             stopsToday = todayEvents.count { it.reason.isStop },
-            wakeUpsToday = todayEvents.count { it.reason == StopReason.OBSERVE },
-            newAppMode = settings.newAppMode,
             running = running,
             recent = recent.map { Recent(it, apps[it.packageName]?.label ?: it.packageName) },
             cards = moduleApps.sumOf { it.cards },
@@ -97,10 +90,6 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
             module = module,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), State())
-
-    fun decide(packageName: String, mode: RuleMode) {
-        viewModelScope.launch { graph.decide(listOf(packageName), mode) }
-    }
 
     fun stopNow(packageName: String) {
         viewModelScope.launch { graph.module.stopNow(listOf(packageName)) }

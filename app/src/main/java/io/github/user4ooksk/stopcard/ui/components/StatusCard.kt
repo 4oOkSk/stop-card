@@ -104,7 +104,7 @@ fun StatusCard(
                     }
                     Spacer(Modifier.weight(1f))
                     when (state) {
-                        Protection.Active, Protection.Observe -> FilledTonalButton(
+                        Protection.Active, Protection.Observe, is Protection.Degraded -> FilledTonalButton(
                             onClick = onPause,
                             colors = ButtonDefaults.filledTonalButtonColors(
                                 containerColor = colors.surface.copy(alpha = 0.6f),
@@ -113,7 +113,7 @@ fun StatusCard(
                         ) { Text("暂停") }
                         Protection.Paused -> Button(onClick = onResume) { Text("恢复") }
                         Protection.NotConfigured, Protection.RootMissing, Protection.ModuleMissing,
-                        is Protection.Failed, is Protection.Degraded ->
+                        is Protection.Failed ->
                             Button(
                                 onClick = onRetry,
                                 colors = ButtonDefaults.buttonColors(

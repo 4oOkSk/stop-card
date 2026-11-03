@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import io.github.user4ooksk.stopcard.BuildConfig
 import io.github.user4ooksk.stopcard.module.ModuleProtocol
+import io.github.user4ooksk.stopcard.module.SystemFacts
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,7 @@ class ModuleClient(
 
     private val commandMutex = Mutex()
     private val configMutex = Mutex()
+    private val preferences = context.getSharedPreferences("module_sync", Context.MODE_PRIVATE)
     private var commandId = System.currentTimeMillis()
     private val primaryUser: Boolean get() = context.applicationInfo.uid / 100000 == 0
 
@@ -59,7 +61,7 @@ class ModuleClient(
     private val _synchronization = MutableStateFlow(Synchronization())
     val synchronization: StateFlow<Synchronization> = _synchronization.asStateFlow()
 
-    fun expectConfiguration() { _synchronization.value = Synchronization(pending = true) }
+    fun expectConfiguration(generation: Long = 0) { _synchronization.value = Synchronization(pending = true, generation = generation) }
 
     fun start() {
         scope.launch {
@@ -115,8 +117,8 @@ class ModuleClient(
                 _state.value = State.Failed("模块版本或系统进程身份不匹配，请重启以加载当前版本", module)
                 _appliedGeneration.value = -1
             } else {
-                _appliedGeneration.value = if (module.configLoaded) module.configGeneration else -1
-                if (module.configLoaded && _synchronization.value.generation == module.configGeneration) {
+                _appliedGeneration.value = module.appliedGeneration
+                if (module.appliedGeneration > 0 && _synchronization.value.generation == module.appliedGeneration) {
                     _synchronization.value = Synchronization(generation = module.configGeneration)
                 }
                 _state.value = State.Connected(module)
@@ -135,14 +137,28 @@ class ModuleClient(
                 val previous = text?.let(ModuleProtocol.Config::fromJson)
                 val diskGeneration = text?.let { JSONObject(it).optLong("configGeneration", 0) } ?: 0L
                 val confirmed = (state.value as? State.Connected)?.module?.configGeneration ?: 0L
-                val next = ModuleProtocol.nextConfig(previous, diskGeneration, confirmed, config)
+                val expected = if (config.configGeneration > 0) config.configGeneration else preferences.getLong("generation", 0)
+                val next = ModuleProtocol.nextConfig(previous, diskGeneration, confirmed, config.copy(configGeneration = expected))
                 _synchronization.value = Synchronization(true, next.configGeneration)
-                check(root.write(ModuleProtocol.CONFIG, next.toJson())) { "写入配置失败，将自动重试" }
+                check(root.writeConfiguration(next.toJson(), text)) { "配置写入冲突或文件锁不可用，请重试或重新载入系统配置" }
+                check(preferences.edit().putLong("generation", next.configGeneration).commit()) { "记录配置代次失败" }
                 next
             }.getOrElse {
                 _synchronization.value = Synchronization(true, error = it.message ?: "配置同步失败")
                 null
             }
+        }
+    }
+
+    /** Explicit conflict recovery. Reading a newer generation never overwrites its content. */
+    suspend fun loadConfiguration(): ModuleProtocol.Config? = configMutex.withLock {
+        withContext(Dispatchers.IO) {
+            check(primaryUser && root.available()) { "需要主用户 Root 授权" }
+            val text = root.read(ModuleProtocol.CONFIG) ?: return@withContext null
+            val config = ModuleProtocol.Config.fromJson(text) ?: error("系统配置无效")
+            check(config.selfPackage == context.packageName)
+            check(preferences.edit().putLong("generation", config.configGeneration).commit())
+            config
         }
     }
 
@@ -165,6 +181,7 @@ class ModuleClient(
                 configGeneration = confirmedGeneration(),
                 expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
                 stop = packages.filter { it.isNotBlank() }.distinct(),
+                identities = packages.mapNotNullTo(HashSet()) { SystemFacts(context).currentIdentity(it) },
             )
             root.write(ModuleProtocol.commandPath(command.id), command.toJson())
         }
@@ -178,6 +195,8 @@ class ModuleClient(
                 configGeneration = confirmedGeneration(),
                 expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
                 stopAll = true,
+                identities = (state.value as? State.Connected)?.module?.apps.orEmpty().filter { it.cards > 0 }
+                    .mapNotNullTo(HashSet()) { SystemFacts(context).currentIdentity(it.packageName) },
             )
             root.write(ModuleProtocol.commandPath(command.id), command.toJson())
         }

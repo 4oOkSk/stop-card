@@ -115,7 +115,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                 ListItem(
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     headlineContent = { Text("无卡页面隐藏后的复核") },
-                    supportingContent = { Text("${current.recentVisibleSeconds} 秒后重新检查。操作链中的页面、回调和绑定全部结束前继续保护；超时只触发复核。") },
+                    supportingContent = { Text("可见窗口继续保护；跨应用操作跟随页面、服务与绑定生命周期，隐藏后最长 ${current.recentVisibleSeconds} 秒兜底，再复核卡片和例外。") },
                 )
                 GroupDivider()
                 ListItem(
@@ -126,9 +126,8 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                 GroupDivider()
                 ListItem(
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("停止后清理普通通知") },
-                    supportingContent = { Text("保留用户的通知渠道设置；前台服务等通知由 Android 在停止服务时处理。") },
-                    trailingContent = { Switch(current.clearNotifications, { on -> viewModel.update { it.copy(clearNotifications = on) } }) },
+                    headlineContent = { Text("停止后的通知清理") },
+                    supportingContent = { Text("由 Android 原生强停处理，保留用户的通知渠道设置。") },
                 )
                 GroupDivider()
                 ListItem(
@@ -151,6 +150,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                     synchronization.generation > 0 -> "模块已确认代次 ${synchronization.generation}"
                     else -> "等待同步"
                 })
+                if (synchronization.error != null) TextButton(onClick = viewModel::reloadConfiguration) { Text("重新载入系统配置") }
             }
         }
 
@@ -249,7 +249,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
         item {
             GroupCard {
                 Column(Modifier.padding(16.dp)) {
-                    Text("独立恢复辅助只监测模块心跳和系统进程重启。监测未就绪时保持观察。连续失败会锁定暂停，下次系统进程启动先检查锁定，再安装挂接。", style = MaterialTheme.typography.bodyMedium)
+                    Text("可选的独立恢复辅助监测模块心跳和系统进程重启，不影响核心能力是否就绪。连续失败会锁定暂停，下次系统进程启动先检查锁定。", style = MaterialTheme.typography.bodyMedium)
                     TextButton(enabled = !busy, onClick = { viewModel.recovery("install") }) { Text("安装或更新恢复辅助") }
                     TextButton(enabled = !busy, onClick = { viewModel.recovery("disable") }) { Text("立即锁定暂停") }
                     TextButton(enabled = !busy, onClick = { viewModel.recovery("rearm") }) { Text("请求解除锁定并保持观察") }

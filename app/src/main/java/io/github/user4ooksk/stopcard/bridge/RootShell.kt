@@ -103,8 +103,32 @@ class RootShell {
     }
 
     fun write(path: String, content: String): Boolean {
+        require(path != ModuleProtocol.CONFIG) { "Use configuration compare-and-swap" }
+        return writeAtomic(path, content)
+    }
+
+    fun writeConfiguration(content: String, expected: String?): Boolean {
+        val digest = expected?.let { java.security.MessageDigest.getInstance("SHA-256")
+            .digest(it.toByteArray(Charsets.UTF_8)).joinToString("") { byte -> "%02x".format(byte) } } ?: "absent"
+        return writeAtomic(ModuleProtocol.CONFIG, content, digest)
+    }
+
+    private fun writeAtomic(path: String, content: String, expected: String? = null): Boolean {
         val dir = path.substringBeforeLast('/')
         val tmp = "$path.${System.nanoTime()}.tmp"
+        val compare = if (expected == null) "" else """
+            exec 9> ${quote("$dir/config.lock")}
+            chmod 0600 ${quote("$dir/config.lock")}
+            flock -n 9 || exit 75
+            if test -e ${quote(path)}; then
+                test ! -L ${quote(path)} || exit 74
+                sc_hash=${'$'}(sha256sum ${quote(path)})
+                sc_hash=${'$'}{sc_hash%% *}
+            else
+                sc_hash=absent
+            fi
+            test "${'$'}sc_hash" = ${quote(expected)} || exit 74
+        """.trimIndent()
         val script = """
             set -eu
             sc_dir=${quote(dir)}
@@ -113,6 +137,7 @@ class RootShell {
             mkdir -p "${'$'}sc_dir"
             chown 0:1000 "${'$'}sc_dir"
             chmod 0770 "${'$'}sc_dir"
+            $compare
             cat > "${'$'}sc_tmp"
             chown 0:1000 "${'$'}sc_tmp"
             chmod 0640 "${'$'}sc_tmp"
