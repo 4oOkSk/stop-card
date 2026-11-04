@@ -88,6 +88,8 @@ class PermissionPolicy {
         val activity: String?,
         var reviewAt: Long,
         val observed: Boolean = false,
+        val systemBinding: Boolean = false,
+        val expiresAt: Long? = null,
     ) {
         val grants = HashSet<Grant>()
         val bindings = HashMap<String, Grant>()
@@ -148,12 +150,14 @@ class PermissionPolicy {
     @Synchronized fun configure(next: AccessRule, now: Long) {
         if (next == rule) return
         val revoked = rule.exceptions - next.exceptions
+        val revokedRoles = rule.essential.keys - next.essential.keys
         rule = next
         for ((pkg, t) in tracks) {
             invalidate(pkg)
             t.due = null
             t.observation = null
             if (t.app in revoked) { t.closing = true; t.reason = "exception_revoked" }
+            if (pkg in revokedRoles && t.running) { t.closing = true; t.reason = "role_revoked" }
         }
         publish(now)
     }
@@ -328,10 +332,21 @@ class PermissionPolicy {
         target: CallTarget,
         now: Long,
         observed: Boolean = false,
+        systemBinding: Boolean = false,
+        systemDependency: Boolean = false,
     ): Long? {
+        if (systemDependency && (!observed || source != target.packageName || target.component.isNullOrBlank() ||
+                target.kind !in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER) ||
+                apps[source]?.let(::systemBound) != true)) return null
+        if (systemBinding) {
+            if (observed || target.kind != EntryKind.BIND || target.component.isNullOrBlank()) return null
+            flows.values.firstOrNull { it.systemBinding && it.source == source && it.grants.any { g -> g.target == target } }
+                ?.let { return it.id }
+        }
         if (track(source) == null || track(target.packageName) == null || flows.size >= MAX_FLOWS) return null
         val id = serial.incrementAndGet()
-        val f = Flow(id, source, sourceActivity, now + rule.hiddenReviewMs, observed)
+        val f = Flow(id, source, sourceActivity, now + rule.hiddenReviewMs, observed, systemBinding,
+            if (systemDependency) now + rule.hiddenReviewMs else null)
         f.grants += Grant(apps.getValue(source), target, observed)
         flows[id] = f
         invalidate(target.packageName)
@@ -343,7 +358,7 @@ class PermissionPolicy {
     /** Extension needs both an existing flow and fresh input for a new target. */
     @Synchronized fun extendFlow(id: Long, from: String, target: CallTarget, hasInput: Boolean, now: Long): Boolean {
         val f = flows[id] ?: return false
-        if (f.observed || !hasInput || !contains(f, from) || f.grants.size >= MAX_FLOW_TARGETS || track(target.packageName) == null) return false
+        if (f.systemBinding || f.observed || !hasInput || !contains(f, from) || f.grants.size >= MAX_FLOW_TARGETS || track(target.packageName) == null) return false
         f.grants += Grant(apps.getValue(from), target, false)
         f.reviewAt = now + rule.hiddenReviewMs
         invalidate(target.packageName)
@@ -354,7 +369,7 @@ class PermissionPolicy {
     /** Dependencies may only address an existing participant and an exact resolved component. */
     @Synchronized fun dependency(id: Long, from: String, target: CallTarget, now: Long): Boolean {
         val f = flows[id] ?: return false
-        if (f.observed || !contains(f, from) || !contains(f, target.packageName) || target.component.isNullOrBlank() ||
+        if (f.systemBinding || f.observed || !contains(f, from) || !contains(f, target.packageName) || target.component.isNullOrBlank() ||
             target.kind !in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST) ||
             f.grants.size >= MAX_FLOW_TARGETS) return false
         f.grants += Grant(apps.getValue(from), target, false)
@@ -422,7 +437,10 @@ class PermissionPolicy {
         val finished = flows.values.filter { f ->
             val visible = f.grants.any { tracks[it.target.packageName]?.visible == true }
             if (visible) f.reviewAt = now + rule.hiddenReviewMs
-            !visible && (now >= f.reviewAt || (!f.trackingUnknown && f.finished &&
+            // A verified system binding lives until native unbind/destruction, even when
+            // its target has no Activity. Ordinary app flows retain the hidden timeout.
+            val systemWork = f.systemBinding && (f.bindings.isNotEmpty() || f.activities.isNotEmpty())
+            !visible && ((now >= (f.expiresAt ?: f.reviewAt) && !systemWork) || (!f.trackingUnknown && f.finished &&
                 f.bindings.isEmpty() && f.activities.isEmpty()))
         }
         for (f in finished) {
@@ -559,13 +577,18 @@ class PermissionPolicy {
             group.all { p.states[it]?.let { v -> v.cards > 0 || v.visible || v.flows > 0 } == true }
     }
     fun liveFlowIds(): Set<Long> = synchronized(this) { flows.keys.toSet() }
+    @Synchronized fun systemBound(app: AppKey): Boolean = apps[app.packageName] == app && flows.values.any { f ->
+        f.systemBinding && f.grants.any { it.target.packageName == app.packageName } &&
+            (f.bindings.isNotEmpty() || f.activities.isNotEmpty())
+    }
     fun flowFor(pkg: String, activity: String? = null): Long? = synchronized(this) {
-        val matching = flows.values.filter { f -> contains(f, pkg) &&
+        val matching = flows.values.filter { f -> !f.systemBinding && contains(f, pkg) &&
             (activity == null || f.activity == activity || activity in f.activities) }
         matching.singleOrNull()?.id
     }
     fun flowForCall(caller: AppKey, target: CallTarget): Long? = synchronized(this) {
-        flows.values.singleOrNull { f -> f.grants.any { it.caller == caller && it.target == target } }?.id
+        val matching = flows.values.filter { f -> f.grants.any { it.caller == caller && it.target == target } }
+        (matching.singleOrNull { it.systemBinding } ?: matching.singleOrNull())?.id
     }
 
     fun isVisible(pkg: String): Boolean = published.states[pkg]?.visible == true

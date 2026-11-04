@@ -3,16 +3,19 @@ package io.github.user4ooksk.stopcard.module
 import android.app.WallpaperManager
 import android.app.admin.DevicePolicyManager
 import android.app.role.RoleManager
+import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
+import android.net.VpnManager
+import android.os.Binder
+import android.os.IInterface
 import android.provider.AlarmClock
 import android.provider.Settings
+import android.util.SparseArray
 import android.view.inputmethod.InputMethodManager
 import io.github.user4ooksk.stopcard.policy.AppKey
 import java.security.MessageDigest
@@ -28,8 +31,6 @@ data class SystemFactSnapshot(
 
 /** Worker-only reads. Failure is unknown; callers retain previous facts and suspend enforcement. */
 class SystemFacts(private val context: Context) {
-    // A framework restart can create the system context before package service publication.
-    // Retry the lookup with the inventory instead of retaining an unavailable service forever.
     private val pm: PackageManager
         get() = checkNotNull(context.packageManager) { "Package service unavailable" }
 
@@ -72,20 +73,21 @@ class SystemFacts(private val context: Context) {
         setting("enabled_notification_listeners", "notification_listener", true)
         setting("autofill_service", "autofill")
         setting("always_on_vpn_app", "vpn")
+        if (pm.hasSystemFeature(PackageManager.FEATURE_APP_WIDGETS)) {
+            val widgets = context.getSystemService(AppWidgetManager::class.java) ?: error("Widget service unavailable")
+            val bound = widgets.javaClass.getMethod("isBoundWidgetPackage", String::class.java, Int::class.javaPrimitiveType)
+            apps.keys.filter { bound.invoke(widgets, it, 0) == true }.forEach { protect(it, "app_widget") }
+        }
         val admins = context.getSystemService(DevicePolicyManager::class.java) ?: error("Device policy unavailable")
         admins.activeAdmins.orEmpty().forEach { protect(it.packageName, "device_admin") }
         protect(context.getSystemService(WallpaperManager::class.java)?.wallpaperInfo?.packageName, "live_wallpaper")
         @Suppress("DEPRECATION")
         pm.queryIntentActivities(Intent(AlarmClock.ACTION_SHOW_ALARMS), PackageManager.MATCH_DEFAULT_ONLY).forEach { protect(it.activityInfo?.packageName, "alarm_clock") }
-        val networks = context.getSystemService(ConnectivityManager::class.java) ?: error("Connectivity unavailable")
-        @Suppress("DEPRECATION")
-        for (network in networks.allNetworks) {
-            val caps = networks.getNetworkCapabilities(network) ?: error("Unknown network capabilities")
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
-            val uid = caps.ownerUid
-            check(uid >= 0) { "Unknown VPN owner" }
-            val owners = pm.getPackagesForUid(uid) ?: error("Unknown VPN package")
-            owners.forEach { protect(it, "vpn") }
+        // Public network capabilities can redact the owner. Query the native primary-user VPN configuration.
+        val vpns = context.getSystemService(VpnManager::class.java) ?: error("VPN service unavailable")
+        activeVpnPackage(vpns)?.let { owner ->
+            check(owner in apps) { "Unknown VPN package" }
+            protect(owner, "vpn")
         }
         // Entry denial must not partially restrict a process shared with an essential component.
         for (group in apps.values.groupBy { it.uid }.values) {
@@ -104,6 +106,25 @@ class SystemFacts(private val context: Context) {
         val homes = reasons.filterValues { "launcher" in it }.keys.mapNotNull { apps[it]?.uid }.toSet()
         return SystemFactSnapshot(apps, apps.values.groupBy { it.uid }.mapValues { (_, group) -> group.mapTo(HashSet()) { it.packageName } },
             reasons.mapValues { it.value.toSet() }, authorities, homes, apps["com.android.systemui"]?.uid ?: -1)
+    }
+
+    private fun activeVpnPackage(manager: VpnManager): String? {
+        fun field(value: Any, name: String): Any? = value.javaClass.getDeclaredField(name)
+            .apply { isAccessible = true }.get(value)
+        fun owner(config: Any?): String? {
+            if (config == null || config.javaClass.getField("legacy").getBoolean(config)) return null
+            return checkNotNull(config.javaClass.getField("user").get(config) as? String) { "Unknown VPN package" }
+        }
+        val service = field(manager, "mService") as IInterface
+        if (service.asBinder() !is Binder)
+            return owner(manager.javaClass.getMethod("getVpnConfig", Int::class.javaPrimitiveType).invoke(manager, 0))
+        // Vpn.getVpnConfig enforces an external Binder caller and rejects the local worker.
+        // Read the same configuration under the same native locks, returning only its owner.
+        val users = field(service, "mVpns") as SparseArray<*>
+        synchronized(users) {
+            val vpn = users[0] ?: return null
+            synchronized(vpn) { return owner(field(vpn, "mConfig")) }
+        }
     }
 
     fun currentIdentity(pkg: String): AppKey? {

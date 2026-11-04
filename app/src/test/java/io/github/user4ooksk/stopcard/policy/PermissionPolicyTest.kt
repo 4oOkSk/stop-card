@@ -37,6 +37,84 @@ class PermissionPolicyTest {
         return p.stops(now + 500).single()
     }
 
+    @Test fun `a newly selected integration cancels an older stop without permitting other apps`() {
+        val p = policy(); opened(p)
+        val ticket = closing(p)
+        p.configure(rule.copy(essential = mapOf(a.packageName to setOf("app_widget"))), 701)
+        assertFalse(p.valid(ticket))
+        assertTrue(p.entry(0, CallTarget(a.packageName, "shop/Widget", EntryKind.BROADCAST), 702).allow)
+        assertNull(p.manual(a.packageName))
+        assertFalse(p.entry(0, CallTarget(c.packageName, "bank/Background", EntryKind.SERVICE), 702).allow)
+        assertTrue(p.stops(4_000).isEmpty())
+    }
+
+    @Test fun `removing a widget waits for an active native VPN binding to finish`() {
+        val p = policy()
+        val system = AppKey(0, "android", 1000, 1, "platform")
+        p.setApps(listOf(a, b, c, system), 2)
+        val platform = rule.copy(essential = mapOf(system.packageName to setOf("system_package")))
+        p.configure(platform.copy(essential = platform.essential + (b.packageName to setOf("app_widget"))), 3)
+        p.running(setOf(b.packageName), 4, baseline = false)
+        val service = CallTarget(b.packageName, "pay/Vpn", EntryKind.BIND)
+        val flow = p.beginFlow(system.packageName, null, service, 5, systemBinding = true)!!
+        assertTrue(p.bind(flow, "native-binding", service, 6, system))
+        p.flowActivity(flow, "native-service", true, 7)
+        p.finishFlow(flow, 8)
+        p.configure(platform, 9)
+        p.reconcile(world(), 40_000)
+        assertTrue(p.stops(40_000).isEmpty())
+        assertTrue(p.entry(0, service, 40_001, system).allow)
+        assertFalse(p.entry(0, service.copy(kind = EntryKind.SERVICE), 40_001, system).allow)
+        p.unbind("native-binding", 40_002)
+        assertTrue(p.stops(40_003).isEmpty())
+        p.flowActivity(flow, "native-service", false, 40_004)
+        p.reconcile(world(), 40_005)
+        assertTrue(p.stops(40_005).isEmpty())
+        assertEquals(listOf(b), p.stops(40_505).map { it.app })
+    }
+
+    @Test fun `system integration dependencies require a real binding and stay within the same installation`() {
+        val p = policy()
+        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
+        p.beginFlow(a.packageName, null, tile, 2, systemBinding = true)!!
+        val service = CallTarget(b.packageName, "pay/Toggle", EntryKind.SERVICE)
+        assertFalse(p.systemBound(b))
+        assertNull(p.beginFlow(b.packageName, null, service, 3, observed = true, systemDependency = true))
+        val flow = p.flowForCall(a, tile)!!
+        assertTrue(p.bind(flow, "tile-binding", tile, 4, a))
+        assertTrue(p.systemBound(b))
+        assertFalse(p.systemBound(b.copy(installedAt = 99)))
+        assertNull(p.beginFlow(b.packageName, null, service.copy(packageName = c.packageName), 5, observed = true, systemDependency = true))
+        assertNull(p.beginFlow(b.packageName, null, service.copy(kind = EntryKind.ACTIVITY), 5, observed = true, systemDependency = true))
+        assertNotNull(p.beginFlow(b.packageName, null, service, 6, observed = true, systemDependency = true))
+        assertEquals("observed_operation", p.entry(0, service, 7, b).reason)
+        assertFalse(p.entry(0, service.copy(component = "pay/Unrelated"), 7, b).allow)
+        assertFalse(p.entry(0, service, 7, c).allow)
+    }
+
+    @Test fun `repeated dependency callbacks cannot renew permission after a system binding ends`() {
+        val p = policy()
+        p.configure(rule.copy(essential = mapOf(a.packageName to setOf("system_package"))), 2)
+        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
+        val native = p.beginFlow(a.packageName, null, tile, 2, systemBinding = true)!!
+        assertTrue(p.bind(native, "tile-binding", tile, 3, a))
+        p.finishFlow(native, 4)
+        val service = CallTarget(b.packageName, "pay/Toggle", EntryKind.SERVICE)
+        val child = p.beginFlow(b.packageName, null, service, 10, observed = true, systemDependency = true)!!
+        p.flowActivity(child, "toggle-service", true, 11)
+        p.unbind("tile-binding", 12)
+        assertFalse(p.systemBound(b))
+        p.flowActivity(child, "toggle-service", true, 29_000)
+        p.reconcile(world(), 30_009)
+        assertTrue(p.entry(0, service, 30_009, b).allow)
+        assertTrue(p.stops(30_009).isEmpty())
+        p.reconcile(world(), 30_010)
+        assertFalse(p.entry(0, service, 30_010, b).allow)
+        assertTrue(p.stops(30_010).isEmpty())
+        assertEquals(listOf(b), p.stops(30_510).map { it.app })
+        assertNull(p.beginFlow(b.packageName, null, service, 30_511, observed = true, systemDependency = true))
+    }
+
     @Test fun `no initialization sweep or historical card permission`() {
         val p = PermissionPolicy().apply {
             setApps(listOf(a, b, c), 0); configure(rule, 0); pause(false, 0)
@@ -547,6 +625,61 @@ class PermissionPolicyTest {
         assertNull(p.flowFor(b.packageName))
         assertTrue(p.stops(5001).isEmpty())
         assertEquals(b, p.stops(5501).single().app)
+    }
+
+    @Test fun `system tile binding survives the hidden timeout and waits for native destruction`() {
+        val p = policy(); opened(p)
+        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, null, tile, 150, systemBinding = true)!!
+        assertTrue(p.bind(flow, "tile-connection", tile, 151, a))
+        p.flowActivity(flow, "tile-service", true, 152)
+        p.finishFlow(flow, 153)
+        p.runningWithoutPermission(b.packageName, 154)
+        p.reconcile(world(task()), 40_000)
+        assertTrue(p.stops(40_000).isEmpty())
+        assertTrue(p.entry(0, tile.copy(kind = EntryKind.PROCESS), 40_000).allow)
+        p.unbind("tile-connection", 40_001)
+        assertTrue(p.stops(80_000).isEmpty())
+        p.flowActivity(flow, "tile-service", false, 80_001)
+        p.finishFlow(flow, 80_001)
+        assertTrue(p.stops(80_002).isEmpty())
+        assertEquals(b, p.stops(80_502).single().app)
+        assertFalse(p.entry(0, tile.copy(kind = EntryKind.PROCESS), 80_502).allow)
+    }
+
+    @Test fun `system tile binding grants only its resolved component and cannot extend an app operation`() {
+        val p = policy(); opened(p)
+        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, null, tile, 150, systemBinding = true)!!
+        assertEquals(flow, p.beginFlow(a.packageName, null, tile, 151, systemBinding = true))
+        assertTrue(p.entry(0, tile, 151, a).allow)
+        assertFalse(p.entry(0, tile, 151, c).allow)
+        assertFalse(p.entry(0, tile.copy(component = "pay/Other"), 151, a).allow)
+        assertFalse(p.entry(0, tile.copy(kind = EntryKind.SERVICE), 151, a).allow)
+        assertFalse(p.entry(0, tile.copy(component = "pay/Other", kind = EntryKind.PROCESS), 151).allow)
+        assertFalse(p.dependency(flow, a.packageName, tile.copy(component = "pay/Other"), 152))
+        assertFalse(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), true, 153))
+        assertNull(p.flowFor(b.packageName))
+        val ordinary = p.beginFlow(a.packageName, "shop-page", CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), 154)!!
+        assertEquals(ordinary, p.flowFor(a.packageName))
+        assertEquals(flow, p.flowForCall(a, tile))
+        assertNull(p.beginFlow(a.packageName, null, tile.copy(component = null), 155, systemBinding = true))
+        assertNull(p.beginFlow(a.packageName, null, tile.copy(kind = EntryKind.SERVICE), 155, systemBinding = true))
+    }
+
+    @Test fun `tile binding created while paused survives resume but not a replacement installation`() {
+        val p = policy()
+        p.pause(true, 100)
+        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, null, tile, 101, systemBinding = true)!!
+        p.bind(flow, "tile-connection", tile, 102, a)
+        p.finishFlow(flow, 103)
+        p.pause(false, 40_000)
+        assertTrue(p.stops(40_001).isEmpty())
+        assertTrue(p.entry(0, tile, 40_001, a).allow)
+        p.setApps(listOf(a, b.copy(installedAt = 99), c), 40_002)
+        assertFalse(p.entry(0, tile, 40_002, a).allow)
+        assertTrue(p.liveFlowIds().isEmpty())
     }
 
     @Test fun `cross app input cannot activate a persistent card or the direct open window`() {

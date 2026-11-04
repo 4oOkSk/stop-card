@@ -105,6 +105,12 @@ object ModuleRuntime : FrameworkCallbacks {
         }
     }
 
+    override fun systemRolesChanged() {
+        factsFresh = false
+        ready = false
+        wake()
+    }
+
     private val loop = object : Runnable {
         override fun run() {
             try { tick() }
@@ -113,7 +119,7 @@ object ModuleRuntime : FrameworkCallbacks {
                 ready = false
                 factsFresh = false
                 policy.unknown(now())
-                lastError = "control:${e.javaClass.simpleName}"
+                lastError = "control:${rootCause(e).javaClass.simpleName}"
                 readFailures++
                 if (readFailures >= 3) recovery = "control_failures"
             } finally {
@@ -135,7 +141,7 @@ object ModuleRuntime : FrameworkCallbacks {
     }
 
     private fun tick() {
-        if (!isBootComplete()) {
+        if (!adapter.bootComplete()) {
             paused = store.paused()
             ready = false
             taskSource = "booting"
@@ -191,6 +197,7 @@ object ModuleRuntime : FrameworkCallbacks {
         if (!ready) policy.unknown(now())
         repeat(pendingFacts.size) { pendingFacts.poll()?.invoke() }
         readFailures = 0
+        if (ready && lastError?.startsWith("control:") == true) lastError = null
         if (ready) {
             for (ticket in policy.stops(now())) execute(ticket)
         }
@@ -345,7 +352,7 @@ object ModuleRuntime : FrameworkCallbacks {
             launches[fact.target.token] = existing
             return EntryDecision(true, "existing_operation")
         }
-        if (source != null && source.packageName != target.packageName && (source.visible || fact.observed)) {
+        if (source != null && (fact.observed || source.packageName != target.packageName && source.visible)) {
             // Source visibility is not user authorization. Observe the unresolved call and hold
             // only its actual Activity/binding chain, without activating a card.
             val flow = policy.beginFlow(source.packageName, source.token, target, at, observed = true)
@@ -413,15 +420,36 @@ object ModuleRuntime : FrameworkCallbacks {
         wake()
     }
 
-    override fun entry(userId: Int, target: CallTarget, sourceUid: Int, sourcePackage: String?, evidence: OpenSource?, observed: Boolean): EntryDecision {
-        if (!ready || !factsFresh || paused) return EntryDecision(true, "initializing_or_paused")
+    override fun entry(userId: Int, target: CallTarget, sourceUid: Int, sourcePackage: String?, evidence: OpenSource?, observed: Boolean, systemEntry: SystemEntry?): EntryDecision {
         val caller = sourcePackage?.let { facts?.apps?.get(it) }?.takeIf { it.uid == sourceUid }
+        // Track native bindings even while paused, so resume retains live system callbacks.
+        val platformCaller = caller?.packageName == "android" && caller.uid == 1000
+        val binding = systemEntry == SystemEntry.BINDING && ready && factsFresh &&
+            (caller?.packageName == "com.android.systemui" || platformCaller)
+        val widget = systemEntry == SystemEntry.WIDGET_BROADCAST && platformCaller && target.kind == EntryKind.BROADCAST
+        if (userId == 0 && caller != null && (binding || widget) && facts?.essential?.get(target.packageName)?.contains("system_package") != true) {
+            if ((binding || policy.flowForCall(caller, target) == null) &&
+                policy.beginFlow(caller.packageName, null, target, now(), systemBinding = binding) == null) {
+                ready = false
+                policy.unknown(now())
+                wake()
+                return EntryDecision(true, "binding_tracking_unknown")
+            }
+            // A widget or VPN can become active immediately before its first callback/bind.
+            // Refresh its role before restricting startup dependencies.
+            if (widget || caller.packageName == "android" && facts?.essential?.containsKey(target.packageName) != true)
+                systemRolesChanged()
+        }
+        if (!ready || !factsFresh || paused) return EntryDecision(true, "initializing_or_paused")
         var result = policy.entry(userId, target, now(), caller)
         if (userId == 0 && result.reason != "essential" && caller != null && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
             val flow = policy.flowFor(caller.packageName)
             if (flow != null) policy.dependency(flow, caller.packageName, target, now())
-            if (policy.flowForCall(caller, target) == null && (evidence != null || observed || policy.isVisible(caller.packageName))) {
-                policy.beginFlow(caller.packageName, null, target, now(), observed = evidence == null)
+            val systemDependency = caller.packageName == target.packageName && policy.systemBound(caller) &&
+                target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER)
+            if (policy.flowForCall(caller, target) == null && (evidence != null || observed || systemDependency || policy.isVisible(caller.packageName))) {
+                policy.beginFlow(caller.packageName, null, target, now(), observed = evidence == null,
+                    systemDependency = systemDependency && evidence == null)
             }
             result = policy.entry(userId, target, now(), caller)
         }
@@ -652,7 +680,6 @@ object ModuleRuntime : FrameworkCallbacks {
         }.onFailure { roleObserverReady = false; lastError = "role_observer:${rootCause(it).javaClass.simpleName}" }
     }
 
-    private fun isBootComplete(): Boolean = Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "sys.boot_completed") == "1"
     private fun defer(pkg: String? = null, uid: Int? = null, action: () -> Unit): Boolean {
         fun matches() = pkg == null || facts?.apps?.get(pkg)?.let { uid == null || uid < 0 || it.uid == uid } == true
         if (facts != null && matches()) return false

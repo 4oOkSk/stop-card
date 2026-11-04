@@ -11,6 +11,7 @@ fun capabilityLabel(key: String): String = when (key) {
     "role_changes" -> "系统角色变更"
     "fact_changes" -> "安装、设置和网络变更"
     "recents_open" -> "最近任务打开"
+    "shortcut_open" -> "桌面快捷方式打开"
     "window_true" -> "可见窗口"
     "window_false" -> "窗口隐藏"
     "activity_finish" -> "操作页面结束"
@@ -30,7 +31,11 @@ fun capabilityLabel(key: String): String = when (key) {
     "pending_intent" -> "延迟操作"
     "process" -> "进程启动"
     "extra_keep_alive" -> "有卡额外保活"
-    else -> if (key.startsWith("stop_")) "停止前会话复核" else key
+    else -> when {
+        key.startsWith("stop_") -> "停止前会话复核"
+        key.startsWith("widget_") -> "小组件添加与移除"
+        else -> key
+    }
 }
 
 fun capabilityStatus(value: String): String = when (value.substringBefore(':')) {
@@ -53,6 +58,7 @@ fun reasonLabel(code: String): String = when (code) {
     "ime", "input_method" -> "输入法"
     "accessibility" -> "无障碍服务"
     "notification_listener" -> "通知使用权"
+    "app_widget" -> "已添加的小组件"
     "autofill" -> "自动填充"
     "device_admin" -> "设备管理"
     "wallpaper", "live_wallpaper" -> "动态壁纸"

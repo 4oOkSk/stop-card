@@ -86,6 +86,16 @@ public class ProbeActivity extends Activity {
         button("Stop own foreground Service", () -> stopService(new Intent(this, ForegroundProbe.class)));
         button("Finish Activity (keep task)", this::finish);
         button("Finish and remove task", this::finishAndRemoveTask);
+        button("Publish own launcher shortcut", () -> {
+            getSystemService(android.content.pm.ShortcutManager.class).setDynamicShortcuts(java.util.Collections.singletonList(
+                new android.content.pm.ShortcutInfo.Builder(this, "probe")
+                    .setShortLabel("Open probe")
+                    .setIntent(new Intent(this, ProbeActivity.class).setAction(Intent.ACTION_VIEW))
+                    .build()));
+            event("launcher shortcut published");
+        });
+        button("Pin own test widget", () -> event("widget pin requested " +
+            getSystemService(android.appwidget.AppWidgetManager.class).requestPinAppWidget(new ComponentName(this, ProbeWidget.class), null, null)));
         button("Refresh local event log", this::refresh);
         output = new TextView(this);
         column.addView(output);

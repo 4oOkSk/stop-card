@@ -6,6 +6,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
 import android.os.SystemClock
@@ -22,6 +23,7 @@ import java.util.function.Consumer
 data class HookCapability(val status: String, val methods: List<String> = emptyList(), val detail: String = "")
 data class ActivityFact(val token: String, val packageName: String, val uid: Int, val task: TaskKey?, val visible: Boolean)
 data class TaskCloseFact(val task: TaskKey, val owner: String, val uid: Int, val pid: Int)
+enum class SystemEntry { BINDING, WIDGET_BROADCAST }
 data class LaunchFact(
     val source: ActivityFact?,
     val target: ActivityFact,
@@ -33,13 +35,14 @@ data class LaunchFact(
 /** Implementations must use memory or enqueue bounded work. Hooks must not wait for the worker. */
 interface FrameworkCallbacks {
     fun wake()
+    fun systemRolesChanged()
     fun launch(fact: LaunchFact): EntryDecision
     fun launched(fact: LaunchFact, success: Boolean, originalToken: String? = null)
     fun window(fact: ActivityFact)
     fun removed(task: TaskKey, owner: String?, userClosed: Boolean)
     fun taskClosed(fact: TaskCloseFact)
     fun activityFinished(token: String)
-    fun entry(userId: Int, target: CallTarget, sourceUid: Int = -1, sourcePackage: String? = null, evidence: OpenSource? = null, observed: Boolean = false): EntryDecision
+    fun entry(userId: Int, target: CallTarget, sourceUid: Int = -1, sourcePackage: String? = null, evidence: OpenSource? = null, observed: Boolean = false, systemEntry: SystemEntry? = null): EntryDecision
     fun binding(token: String, source: String?, target: CallTarget, added: Boolean)
     fun component(token: String, source: String?, target: CallTarget, added: Boolean)
     fun fault(capability: String, cause: Throwable)
@@ -70,7 +73,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val broadcastOrigins = java.util.WeakHashMap<Any, BroadcastOrigin>()
     private val interactions = InputProvenance()
     private val pointerDown = ConcurrentHashMap<Int, ActivityFact>()
-    private data class ServiceCall(val kind: EntryKind, val source: String?, val uid: Int, var record: Any? = null)
+    private data class ServiceCall(val kind: EntryKind, val source: String?, val uid: Int, val pid: Int, var record: Any? = null)
 
     @Volatile private var atm: Any? = null
     @Volatile private var wm: Any? = null
@@ -85,6 +88,15 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
 
     fun report(): Map<String, HookCapability> = capabilities.toSortedMap()
 
+    fun bootComplete(): Boolean {
+        // sys.boot_completed survives a system_server restart. Never initialize context services
+        // until this process has finished its own boot phases; premature lookups cache nulls.
+        val type = Class.forName("com.android.server.SystemServiceManager", false, loader)
+        val registry = Class.forName("com.android.server.LocalServices", false, loader)
+        val manager = registry.getMethod("getService", Class::class.java).invoke(null, type) ?: return false
+        return type.getMethod("isBootCompleted").invoke(manager) == true
+    }
+
     fun identities(launchers: Set<Int>, systemUi: Int, authorities: Map<String, Triple<String, Int, String>>) {
         launcherUids = launchers
         systemUiUid = systemUi
@@ -98,6 +110,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         captureClass("com.android.server.am.ActivityManagerService", "system_ready") { ams = it }
         captureClass("com.android.server.notification.NotificationManagerService", "notification_service") { nms = it }
         taskHooks()
+        systemIntegrationHooks()
         inputHooks()
         activityHooks()
         serviceHooks()
@@ -203,6 +216,36 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         })
     }
 
+    private fun systemIntegrationHooks() {
+        hook("shortcut_open", "com.android.server.pm.LauncherAppsService\$LauncherAppsImpl", "startShortcut", {
+            val parameters = listOf(
+                "java.lang.String", "java.lang.String", "java.lang.String", "java.lang.String",
+                "android.graphics.Rect", "android.os.Bundle", "int")
+            it.returnType == Boolean::class.javaPrimitiveType && names(it) in listOf(parameters, listOf("android.os.IBinder") + parameters)
+        }, before = {
+            if (Binder.getCallingUid() in launcherUids) launchSource.set(OpenSource.LAUNCHER)
+        })
+        for ((method, parameters) in mapOf(
+            "bindAppWidgetId" to listOf("java.lang.String", "int", "int", "android.content.ComponentName", "android.os.Bundle"),
+            "deleteAppWidgetId" to listOf("java.lang.String", "int"),
+            "deleteHost" to listOf("java.lang.String", "int"),
+            "deleteAllHosts" to emptyList(),
+        )) {
+            hook("widget_$method", "com.android.server.appwidget.AppWidgetServiceImpl", method, {
+                names(it) == parameters && it.returnType == (if (method == "bindAppWidgetId") Boolean::class.javaPrimitiveType else Void.TYPE)
+            }, before = {
+                val uid = Binder.getCallingUid()
+                if (recentsCaller(uid, Binder.getCallingPid()) || uid == 1000 && Binder.getCallingPid() == android.os.Process.myPid())
+                    sink.systemRolesChanged()
+            }, after = {
+                // Refresh again after the native lock is released, including failed requests.
+                val uid = Binder.getCallingUid()
+                if (recentsCaller(uid, Binder.getCallingPid()) || uid == 1000 && Binder.getCallingPid() == android.os.Process.myPid())
+                    sink.systemRolesChanged()
+            })
+        }
+    }
+
     private fun activityHooks() {
         hook("activity_request", "com.android.server.wm.ActivityStarter", "executeRequest", {
             it.returnType == Int::class.javaPrimitiveType && names(it) == listOf("com.android.server.wm.ActivityStarter\$Request")
@@ -286,7 +329,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 else n.take(5) == listOf("android.app.IApplicationThread", "android.os.IBinder", "android.content.Intent", "java.lang.String", "android.app.IServiceConnection") && n.takeLast(2) == listOf("java.lang.String", "int") && it.returnType == Int::class.javaPrimitiveType
             }, before = { p ->
                 val source = if (kind == EntryKind.SERVICE) p.args[6] as? String else p.args[p.args.size - 2] as? String
-                serviceCalls.set(ServiceCall(kind, source, if (kind == EntryKind.SERVICE) p.args[4] as Int else Binder.getCallingUid()))
+                serviceCalls.set(ServiceCall(kind, source, if (kind == EntryKind.SERVICE) p.args[4] as Int else Binder.getCallingUid(), Binder.getCallingPid()))
             }, after = { p ->
                 val context = serviceCalls.get()
                 val record = context?.record
@@ -308,7 +351,20 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val name = field(r, "name") as ComponentName
             val info = field(r, "appInfo") as ApplicationInfo
             val target = CallTarget(name.packageName, name.flattenToString(), context.kind)
-            val decision = entry(info.uid / 100000, target, context.uid, context.source)
+            // SystemUI must bind a tile before it can show its state or deliver a click.
+            // Use the resolved, permission-protected service and the actual caller process;
+            // a package name or QS_TILE action supplied by another app is insufficient.
+            val permission = (field(r, "serviceInfo") as ServiceInfo).permission
+            val action = (p.args[0] as Intent).action
+            val systemBinding = context.kind == EntryKind.BIND && info.uid / 100000 == 0 && when {
+                context.source == "com.android.systemui" && trustedSystemUi(context.uid, context.pid) ->
+                    action == android.service.quicksettings.TileService.ACTION_QS_TILE && permission == android.Manifest.permission.BIND_QUICK_SETTINGS_TILE
+                context.source == "android" && context.uid == 1000 && context.pid == android.os.Process.myPid() ->
+                    permission == android.Manifest.permission.BIND_VPN_SERVICE
+                else -> false
+            }
+            val decision = if (systemBinding) sink.entry(0, target, context.uid, context.source, systemEntry = SystemEntry.BINDING)
+                else entry(info.uid / 100000, target, context.uid, context.source)
             if (!decision.allow) {
                 // Both callers check res == null before creating AppBindRecord/ConnectionRecord:
                 // startServiceLocked returns null; bindServiceLocked returns 0 (not bound).
@@ -417,8 +473,12 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val callerUid = field(record, "callingUid") as Int
             val callerPackage = field(record, "callerPackage") as? String
             val target = CallTarget(pkg, component, EntryKind.BROADCAST)
+            val intent = field(record, "intent") as Intent
+            val widget = callerUid == 1000 && callerPackage == "android" && info != null &&
+                intent.component == ComponentName(pkg, info.name) && intent.action in WIDGET_ACTIONS
             val decision = sink.entry(uid / 100000, target,
-                callerUid, callerPackage, origin?.evidence ?: inputEvidence(callerUid, callerPackage, pkg), origin?.observed == true)
+                callerUid, callerPackage, origin?.evidence ?: inputEvidence(callerUid, callerPackage, pkg), origin?.observed == true,
+                if (widget) SystemEntry.WIDGET_BROADCAST else null)
             if (!decision.allow) p.result = "Stop Card: no runtime permission"
             else sink.component(token(record), callerPackage, target, true)
             // The native queue consumes this reason in both cold and warm dispatch,
@@ -537,7 +597,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             if (trustedSystemUi(sender, Binder.getCallingPid())) {
                 if (token(p.thisObject) in notificationIntents) launchSource.set(OpenSource.NOTIFICATION)
                 else pendingObserved.set(true)
-            }
+            } else if (sender in launcherUids) pendingObserved.set(true)
             // Gate the final resolved Activity/service/receiver after native user and fill-in
             // resolution. A creator package or mutable original Intent is not the target identity.
         })
@@ -761,7 +821,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                         capability == "activity_request" -> param.setObjectExtra("stopcard.request", activityRequest.get())
                         capability.startsWith("close_context_") -> param.setObjectExtra("stopcard.closeCaller", closeCaller.get())
                         capability.endsWith("_context") -> param.setObjectExtra("stopcard.previous", serviceCalls.get())
-                        capability == "pending_intent" || capability == "recents_open" -> {
+                        capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
                             param.setObjectExtra("stopcard.previous", launchSource.get())
                             param.setObjectExtra("stopcard.pendingObserved", pendingObserved.get())
                             param.setObjectExtra("stopcard.pendingCaller", pendingCaller.get())
@@ -779,7 +839,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                             capability == "activity_request" -> activityRequest.set(param.getObjectExtra("stopcard.request"))
                             capability.startsWith("close_context_") -> closeCaller.set(param.getObjectExtra("stopcard.closeCaller") as? Caller)
                             capability.endsWith("_context") -> serviceCalls.set(param.getObjectExtra("stopcard.previous") as? ServiceCall)
-                            capability == "pending_intent" || capability == "recents_open" -> {
+                            capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
                                 launchSource.set(param.getObjectExtra("stopcard.previous") as? OpenSource)
                                 pendingObserved.set(param.getObjectExtra("stopcard.pendingObserved") as? Boolean)
                                 pendingCaller.set(param.getObjectExtra("stopcard.pendingCaller") as? ActivityFact)
@@ -852,6 +912,15 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         Boolean::class.javaPrimitiveType -> Boolean::class.javaObjectType
         Float::class.javaPrimitiveType -> Float::class.javaObjectType
         else -> type
+    }
+
+    private companion object {
+        val WIDGET_ACTIONS = setOf(
+            "android.appwidget.action.APPWIDGET_ENABLED", "android.appwidget.action.APPWIDGET_UPDATE",
+            "android.appwidget.action.APPWIDGET_ENABLE_AND_UPDATE", "android.appwidget.action.APPWIDGET_OPTIONS_CHANGED",
+            "android.appwidget.action.APPWIDGET_DELETED", "android.appwidget.action.APPWIDGET_DISABLED",
+            "android.appwidget.action.APPWIDGET_RESTORED",
+        )
     }
 
 }
