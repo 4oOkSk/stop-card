@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import io.github.user4ooksk.stopcard.AppGraph
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
 import io.github.user4ooksk.stopcard.data.db.PackageCount
+import io.github.user4ooksk.stopcard.data.RulesRepository
+import kotlinx.coroutines.CancellationException
 import io.github.user4ooksk.stopcard.model.AppRule
 import io.github.user4ooksk.stopcard.model.InstalledApp
 import io.github.user4ooksk.stopcard.model.RuleMode
@@ -33,6 +35,9 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         val visible: Boolean = false,
         val state: String = "managed",
         val reasons: Set<String> = emptySet(),
+        val running: Boolean = false,
+        val stopped: Boolean = false,
+        val statusKnown: Boolean = false,
     ) {
         /** True when the global rule applies; an ALLOW row or a system role exempts it. */
         val managed: Boolean get() = !isProtected && rule?.exempt != true
@@ -50,6 +55,9 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
 
     val query = MutableStateFlow("")
     val filter = MutableStateFlow(Filter.ALL)
+    data class Notice(val message: String, val undo: RulesRepository.UndoBatch? = null)
+    val notice = MutableStateFlow<Notice?>(null)
+    val editing = MutableStateFlow(false)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val countsToday = dayStarts().flatMapLatest { graph.events.countsSince(it) }
@@ -72,7 +80,8 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         val all = apps.values
             .filter { it.packageName != graph.context.packageName }
             .filter { settings.showSystemApps || !it.isSystem || rules[it.packageName]?.exempt == true }
-            .map { app -> item(app, rules, counts, moduleApps, essential) }
+            .map { app -> item(app, rules, counts, moduleApps, essential,
+                (module as? ModuleClient.State.Connected)?.module?.ready == true) }
         val matching = if (query.isBlank()) all else {
             val q = query.trim()
             all.filter { it.app.label.contains(q, ignoreCase = true) || it.app.packageName.contains(q, ignoreCase = true) }
@@ -92,7 +101,47 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun decide(packageNames: List<String>, mode: RuleMode) {
-        viewModelScope.launch { graph.rules.decide(packageNames, mode) }
+        if (editing.value) return
+        editing.value = true
+        viewModelScope.launch {
+            try {
+                val batch = graph.rules.decide(packageNames, mode)
+                notice.value = Notice(if (batch.count == 0) "没有需要修改的应用" else "已修改 ${batch.count} 个应用", batch.takeIf { it.count > 0 })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                notice.value = Notice("修改失败，请重试")
+            } finally {
+                editing.value = false
+            }
+        }
+    }
+
+    fun dismissNotice(value: Notice) {
+        if (notice.value === value) notice.value = null
+    }
+
+    fun undo(value: Notice) {
+        val batch = value.undo ?: return
+        if (editing.value) return
+        editing.value = true
+        dismissNotice(value)
+        viewModelScope.launch {
+            try {
+                val count = graph.rules.undo(batch)
+                notice.value = Notice(when (count) {
+                    batch.count -> "已撤销 ${count} 个应用的修改"
+                    0 -> "设置已变化，无可撤销的修改"
+                    else -> "已撤销 ${count} 个应用，其余设置已变化"
+                })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                notice.value = Notice("撤销失败，请重试", batch)
+            } finally {
+                editing.value = false
+            }
+        }
     }
 
     fun setShowSystem(show: Boolean) {
@@ -113,6 +162,7 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         counts: Map<String, PackageCount>,
         moduleApps: Map<String, io.github.user4ooksk.stopcard.model.RunningApp>,
         essential: Map<String, Set<String>>,
+        statusKnown: Boolean,
     ): Item {
         val module = moduleApps[app.packageName]
         return Item(
@@ -124,6 +174,9 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
             visible = module?.visible ?: false,
             state = module?.state ?: "managed",
             reasons = essential[app.packageName].orEmpty() + if (app.isSystem) setOf("system_package") else emptySet(),
+            running = module?.running == true,
+            stopped = module?.stopped == true,
+            statusKnown = statusKnown,
         )
     }
 

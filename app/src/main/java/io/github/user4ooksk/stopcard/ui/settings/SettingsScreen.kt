@@ -1,22 +1,19 @@
 package io.github.user4ooksk.stopcard.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -28,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,12 +36,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.BuildConfig
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
 import io.github.user4ooksk.stopcard.model.ThemeMode
+import io.github.user4ooksk.stopcard.ui.capabilityLabel
+import io.github.user4ooksk.stopcard.ui.capabilityStatus
 import io.github.user4ooksk.stopcard.ui.components.GroupCard
 import io.github.user4ooksk.stopcard.ui.components.GroupDivider
 import io.github.user4ooksk.stopcard.ui.components.SectionHeader
 import io.github.user4ooksk.stopcard.ui.graphViewModel
-import io.github.user4ooksk.stopcard.ui.capabilityLabel
-import io.github.user4ooksk.stopcard.ui.capabilityStatus
+import io.github.user4ooksk.stopcard.ui.moduleProblem
 
 @Composable
 fun SettingsScreen(contentPadding: PaddingValues) {
@@ -54,258 +53,153 @@ fun SettingsScreen(contentPadding: PaddingValues) {
     val maintenance by viewModel.maintenance.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val current = settings ?: return
+    var page by rememberSaveable { mutableStateOf("设置") }
+    var showTechnical by rememberSaveable { mutableStateOf(false) }
+    var recoveryAction by remember { mutableStateOf<String?>(null) }
     var diagnostics by remember { mutableStateOf<String?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val listState = remember(page) { LazyListState() }
+    BackHandler(page != "设置") { page = "设置" }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = top + 8.dp,
-            bottom = contentPadding.calculateBottomPadding() + 24.dp,
-        ),
+        contentPadding = PaddingValues(16.dp, top + 8.dp, 16.dp, contentPadding.calculateBottomPadding() + 24.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        item {
-            Text(
-                "设置",
-                style = MaterialTheme.typography.headlineLarge,
-                modifier = Modifier.padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
-            )
-        }
-
-        item { SectionHeader("保护") }
-        item {
-            GroupCard {
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("卡片规则") },
-                    supportingContent = { Text("卡片还在就允许运行；最后一张卡移除后复核停止。") },
-                    trailingContent = {
-                        Switch(
-                            checked = current.protectionEnabled,
-                            onCheckedChange = viewModel::setProtectionEnabled,
-                        )
-                    },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("观察模式") },
-                    supportingContent = { Text("只记录“本来会怎么判”，不拦截、不强停。建议先观察一段时间。") },
-                    trailingContent = {
-                        Switch(
-                            checked = current.observeOnly,
-                            onCheckedChange = viewModel::setObserveOnly,
-                        )
-                    },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("划卡复核窗口") },
-                    supportingContent = { Text("${current.reviewMs} 毫秒。用于防止刚划掉又打开时被旧决策误杀。") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("无卡页面隐藏后的复核") },
-                    supportingContent = { Text("可见窗口继续保护；跨应用操作跟随页面、服务与绑定生命周期，隐藏后最长 ${current.recentVisibleSeconds} 秒兜底，再复核卡片和例外。") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("通知入口拦截") },
-                    supportingContent = { Text("按通知所属应用检查运行许可，代理发布也检查目标应用。入口是否挂接见下方能力状态。") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("停止后的通知清理") },
-                    supportingContent = { Text("由 Android 原生强停处理，保留用户的通知渠道设置。") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("有卡额外保活") },
-                    supportingContent = { Text("仅调整有卡应用的缓存进程回收优先级，不保证常驻。默认关闭；启用后需测量耗电和存活。") },
-                    trailingContent = { Switch(current.extraKeepAlive, { on -> viewModel.update { it.copy(extraKeepAlive = on) } }) },
-                )
+        item(key = "$page-title") {
+            Row {
+                if (page != "设置") TextButton(onClick = { page = "设置" }) { Text("返回") }
+                Text(page, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(8.dp))
             }
         }
-
-        item { SectionHeader("模块状态") }
-        item {
-            GroupCard {
-                ModuleRows(module)
-                GroupDivider()
-                RowMessage("配置确认", when {
-                    synchronization.error != null -> synchronization.error!!
-                    synchronization.pending -> "等待模块确认代次 ${synchronization.generation}"
-                    synchronization.generation > 0 -> "模块已确认代次 ${synchronization.generation}"
-                    else -> "等待同步"
-                })
-                if (synchronization.error != null) TextButton(onClick = viewModel::reloadConfiguration) { Text("重新载入系统配置") }
-            }
-        }
-
-        item { SectionHeader("应用") }
-        item {
-            GroupCard {
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("显示系统应用") },
-                    supportingContent = { Text("系统应用默认不按卡片规则管理；这里只影响列表显示。") },
-                    trailingContent = {
-                        Switch(
-                            checked = current.showSystemApps,
-                            onCheckedChange = { show -> viewModel.update { it.copy(showSystemApps = show) } },
-                        )
-                    },
-                )
-            }
-        }
-
-        item { SectionHeader("外观") }
-        item {
-            GroupCard {
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("主题") },
-                    supportingContent = {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ThemeMode.entries.forEach { mode ->
-                                FilterChip(
-                                    selected = current.themeMode == mode,
-                                    onClick = { viewModel.update { it.copy(themeMode = mode) } },
-                                    label = {
-                                        Text(
-                                            when (mode) {
-                                                ThemeMode.SYSTEM -> "跟随系统"
-                                                ThemeMode.LIGHT -> "浅色"
-                                                ThemeMode.DARK -> "深色"
-                                            },
-                                        )
-                                    },
-                                )
-                            }
+        when (page) {
+            "设置" -> {
+                item { SectionHeader("保护") }
+                item {
+                    GroupCard {
+                        SettingSwitch("卡片规则", "无卡片且无其他保护时停止应用。", current.protectionEnabled, viewModel::setProtectionEnabled)
+                        GroupDivider()
+                        SettingSwitch("观察模式", "仅记录，不拦截或停止应用。", current.observeOnly, viewModel::setObserveOnly)
+                        GroupDivider()
+                        SettingSwitch("减少有卡应用回收", "降低缓存进程被回收的概率。", current.extraKeepAlive) { on ->
+                            viewModel.update { it.copy(extraKeepAlive = on) }
                         }
-                    },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("动态颜色") },
-                    supportingContent = { Text("使用壁纸提取的颜色。") },
-                    trailingContent = {
-                        Switch(
-                            checked = current.dynamicColor,
-                            onCheckedChange = { on -> viewModel.update { it.copy(dynamicColor = on) } },
+                    }
+                }
+                item {
+                    GroupCard {
+                        ModuleSummary(module)
+                        if (synchronization.pending || synchronization.error != null) {
+                            RowMessage("配置", if (synchronization.error != null) "同步失败，请重新载入。" else "正在同步")
+                            if (synchronization.error != null) TextButton(onClick = viewModel::reloadConfiguration) { Text("重新载入") }
+                        }
+                    }
+                }
+                item { SectionHeader("应用") }
+                item {
+                    GroupCard {
+                        SettingSwitch("显示系统应用", null, current.showSystemApps) { show -> viewModel.update { it.copy(showSystemApps = show) } }
+                    }
+                }
+                item { SectionHeader("外观") }
+                item {
+                    GroupCard {
+                        ListItem(
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            headlineContent = { Text("主题") },
+                            supportingContent = {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    ThemeMode.entries.forEach { mode ->
+                                        FilterChip(
+                                            selected = current.themeMode == mode,
+                                            onClick = { viewModel.update { it.copy(themeMode = mode) } },
+                                            label = { Text(when (mode) { ThemeMode.SYSTEM -> "跟随系统"; ThemeMode.LIGHT -> "浅色"; ThemeMode.DARK -> "深色" }) },
+                                        )
+                                    }
+                                }
+                            },
                         )
-                    },
-                )
-            }
-        }
-
-        item { SectionHeader("维护") }
-        item {
-            GroupCard {
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("清除历史") },
-                    supportingContent = { Text("删除本地决策日志。不会改变应用例外。") },
-                    modifier = Modifier.fillMaxWidth(),
-                    trailingContent = {
-                        TextButton(onClick = viewModel::clearHistory) { Text("清除") }
-                    },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("清除全部例外") },
-                    supportingContent = { Text("恢复为所有普通应用都按卡片规则管理。") },
-                    trailingContent = {
-                        TextButton(onClick = { confirmReset = true }) { Text("清除") }
-                    },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("诊断信息") },
-                    supportingContent = { Text("Root、模块文件和状态。") },
-                    trailingContent = {
-                        TextButton(onClick = { viewModel.diagnostics { diagnostics = it } }) { Text("查看") }
-                    },
-                )
-            }
-        }
-
-        item { SectionHeader("故障恢复") }
-        item {
-            GroupCard {
-                Column(Modifier.padding(16.dp)) {
-                    Text("可选的独立恢复辅助监测模块心跳和系统进程重启，不影响核心能力是否就绪。连续失败会锁定暂停，下次系统进程启动先检查锁定。", style = MaterialTheme.typography.bodyMedium)
-                    TextButton(enabled = !busy, onClick = { viewModel.recovery("install") }) { Text("安装或更新恢复辅助") }
-                    TextButton(enabled = !busy, onClick = { viewModel.recovery("disable") }) { Text("立即锁定暂停") }
-                    TextButton(enabled = !busy, onClick = { viewModel.recovery("rearm") }) { Text("请求解除锁定并保持观察") }
-                    Text("更新已运行的辅助后需要重启手机。解除锁定仅在当前模块心跳正常时执行，之后需手动恢复卡片规则。", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "adb shell su -c 'sh /data/adb/stop_card_recovery/disable.sh'",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "暂停不会自动恢复被强停应用的推送；重新打开应用才会恢复其正常调度。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text("手机不能正常启动时，在 KernelSU/Vector 中停用 Stop Card；恢复辅助的关闭脚本也可从支持访问 /data 的恢复环境运行。实际恢复路径须在本机验收。", style = MaterialTheme.typography.bodySmall)
+                        GroupDivider()
+                        SettingSwitch("动态颜色", "使用壁纸颜色。", current.dynamicColor) { on -> viewModel.update { it.copy(dynamicColor = on) } }
+                    }
+                }
+                item { SectionHeader("维护") }
+                item {
+                    GroupCard {
+                        ActionRow("清除记录", "保留应用例外。", "清除", onClick = viewModel::clearHistory)
+                        GroupDivider()
+                        ActionRow("清除全部例外", null, "清除", onClick = { confirmReset = true })
+                        GroupDivider()
+                        ActionRow("诊断", null, "查看", onClick = { page = "诊断"; showTechnical = false })
+                        GroupDivider()
+                        ActionRow("故障恢复", null, "查看", onClick = { page = "故障恢复" })
+                    }
+                }
+                item { SectionHeader("关于") }
+                item {
+                    GroupCard {
+                        RowMessage("Stop Card", "${BuildConfig.VERSION_NAME} · GPL-3.0 · 基于 Stop")
+                        GroupDivider()
+                        RowMessage("源码", "github.com/4oOkSk/stop-card")
+                    }
                 }
             }
-        }
-
-        item { SectionHeader("关于") }
-        item {
-            GroupCard {
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("Stop Card") },
-                    supportingContent = { Text("版本 ${BuildConfig.VERSION_NAME} · GPL-3.0 · 基于 Stop") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("源码") },
-                    supportingContent = { Text("github.com/4oOkSk/stop-card") },
-                )
-                GroupDivider()
-                ListItem(
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                    headlineContent = { Text("本机") },
-                    supportingContent = { Text(context.packageName) },
-                )
+            "诊断" -> {
+                item {
+                    GroupCard {
+                        ModuleSummary(module)
+                        ActionRow("技术信息", null, if (showTechnical) "收起" else "展开", onClick = { showTechnical = !showTechnical })
+                        ActionRow("完整诊断", null, "查看", onClick = { viewModel.diagnostics { diagnostics = it } })
+                    }
+                }
+                if (showTechnical) item {
+                    GroupCard {
+                        RowMessage("配置确认", synchronization.error ?: when {
+                            synchronization.pending -> "等待代次 ${synchronization.generation}"
+                            else -> "已确认代次 ${synchronization.generation}"
+                        })
+                        ModuleRows(module)
+                    }
+                }
+            }
+            "故障恢复" -> {
+                item {
+                    GroupCard {
+                        ActionRow("恢复辅助", null, "安装或更新", !busy) { recoveryAction = "install" }
+                        GroupDivider()
+                        ActionRow("锁定暂停", null, "锁定", !busy) { recoveryAction = "disable" }
+                        GroupDivider()
+                        ActionRow("解除锁定", null, "解除", !busy) { recoveryAction = "rearm" }
+                    }
+                }
+                item {
+                    RowMessage("无法正常启动", "在模块管理器中停用 Stop Card，然后重启。")
+                }
             }
         }
     }
 
+    recoveryAction?.let { action ->
+        val title = when (action) { "install" -> "安装或更新恢复辅助"; "disable" -> "锁定暂停"; else -> "解除锁定" }
+        val explanation = when (action) {
+            "install" -> "辅助程序在模块连续异常时锁定暂停。安装或更新后请重启手机。"
+            "disable" -> "暂停管控，并阻止下次启动时执行规则。已停止的应用需重新打开。"
+            else -> "仅在模块心跳正常时解除锁定。解除后保持暂停和观察模式，请检查状态后再启用。"
+        }
+        AlertDialog(
+            onDismissRequest = { recoveryAction = null },
+            title = { Text(title) }, text = { Text(explanation) },
+            confirmButton = { TextButton(enabled = !busy, onClick = { recoveryAction = null; viewModel.recovery(action) }) { Text(title) } },
+            dismissButton = { TextButton(onClick = { recoveryAction = null }) { Text("取消") } },
+        )
+    }
     diagnostics?.let { text ->
         AlertDialog(
-            onDismissRequest = { diagnostics = null },
-            title = { Text("诊断信息") },
-            text = {
-                Text(
-                    text.ifBlank { "没有输出。请确认 KernelSU 已授权 Stop Card。" },
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            },
+            onDismissRequest = { diagnostics = null }, title = { Text("诊断") },
+            text = { Text(text.ifBlank { "没有诊断信息，请检查 Root 权限。" }, Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) },
             confirmButton = { TextButton(onClick = { diagnostics = null }) { Text("关闭") } },
             dismissButton = { TextButton(onClick = {
                 val share = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -320,88 +214,72 @@ fun SettingsScreen(contentPadding: PaddingValues) {
         AlertDialog(onDismissRequest = { viewModel.maintenance.value = null }, title = { Text("操作结果") },
             text = { Text(message) }, confirmButton = { TextButton(onClick = { viewModel.maintenance.value = null }) { Text("关闭") } })
     }
-    if (confirmReset) {
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
-            title = { Text("清除全部例外？") },
-            text = { Text("所有普通应用都会重新按卡片规则管理。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmReset = false
-                    viewModel.resetExceptions()
-                }) { Text("清除") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("取消") } },
-        )
-    }
+    if (confirmReset) AlertDialog(
+        onDismissRequest = { confirmReset = false }, title = { Text("清除全部例外？") },
+        text = { Text("普通应用将恢复按卡片管理。") },
+        confirmButton = { TextButton(onClick = { confirmReset = false; viewModel.resetExceptions() }) { Text("清除") } },
+        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("取消") } },
+    )
 }
 
 @Composable
-private fun ModuleRows(module: ModuleClient.State) {
+private fun SettingSwitch(title: String, body: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        headlineContent = { Text(title) }, supportingContent = body?.let { { Text(it) } },
+        trailingContent = { Switch(checked, onChange) },
+    )
+}
+
+@Composable
+private fun ActionRow(title: String, body: String?, action: String, enabled: Boolean = true, onClick: () -> Unit) {
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        headlineContent = { Text(title) }, supportingContent = body?.let { { Text(it) } },
+        trailingContent = { TextButton(enabled = enabled, onClick = onClick) { Text(action) } },
+    )
+}
+
+@Composable
+private fun ModuleSummary(module: ModuleClient.State) {
     when (module) {
-        ModuleClient.State.NoRoot -> RowMessage("需要 Root", "无法读取模块文件。请在 KernelSU 中授权 Stop Card。")
-        ModuleClient.State.Waiting -> RowMessage("等待模块", "尚未读到状态文件。确认 Vector 已启用本模块并重启手机。")
-        is ModuleClient.State.Failed -> RowMessage("模块未就绪", module.message)
+        ModuleClient.State.NoRoot -> RowMessage("需要 Root", "请授予 Stop Card Root 权限。")
+        ModuleClient.State.Waiting -> RowMessage("等待模块", "请在 LSPosed 中启用模块，选择“系统框架”，然后重启。")
+        is ModuleClient.State.Failed -> RowMessage("模块未就绪", moduleProblem(module.message))
         is ModuleClient.State.Connected -> {
             val m = module.module
-            if (!m.configLoaded) {
-                RowMessage("等待配置", "模块已运行，但尚未读到配置。完成引导或重新打开本应用。")
-                return
+            when {
+                !m.configLoaded -> RowMessage("等待配置", "请完成引导或重新打开应用。")
+                m.paused -> RowMessage("已暂停")
+                !m.ready -> RowMessage("模块未就绪", moduleProblem(m.lastError))
+                m.observeOnly -> RowMessage("观察中")
+                else -> RowMessage("已启用")
             }
-            ListItem(
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                headlineContent = { Text("系统框架内模块") },
-                supportingContent = {
-                    Text("PID ${m.pid} · UID ${m.uid} · SDK ${m.sdk} · 配置代次 ${m.configGeneration}")
-                },
-                trailingContent = {
-                    AssistChip(onClick = {}, label = { Text(when { m.paused -> "已暂停"; !m.ready -> "初始化或降级"; m.observeOnly -> "观察中"; else -> "执行中" }) })
-                },
-            )
-            GroupDivider()
-            ListItem(
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                headlineContent = { Text("能力") },
-                supportingContent = { Text("卡片：${capabilityStatus(m.cardControl)} · 通知：${capabilityStatus(m.notificationControl)} · 后台入口：${capabilityStatus(m.wakeControl)}") },
-            )
-            GroupDivider()
-            RowMessage("独立恢复", if (m.recovery == "watching") "监测心跳正常" else "未就绪或已锁定，保持观察：${m.recovery}")
-            m.hooks.forEach { (key, status) ->
-                GroupDivider()
-                RowMessage(capabilityLabel(key), capabilityStatus(status) + if (':' in status) " · ${status.substringAfter(':')}" else "")
-            }
-            if (m.flows.isNotEmpty()) {
-                GroupDivider()
-                RowMessage("操作链", m.flows.joinToString("\n"))
-            }
-            if (m.commandResults.isNotEmpty()) {
-                GroupDivider()
-                RowMessage("命令回执", m.commandResults.entries.toList().takeLast(5).joinToString("\n") { "${it.key}: ${it.value}" })
-            }
-            GroupDivider()
-            ListItem(
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                headlineContent = { Text("任务来源") },
-                supportingContent = {
-                    Text(
-                        when (m.taskSource) {
-                            "ok" -> "最近任务读取正常"
-                            "empty" -> "最近任务为空"
-                            "denied" -> "没有读取最近任务的权限"
-                            else -> m.taskSource
-                        } + " · 已停止 ${m.stops} 次" + (m.lastError?.let { "\n$it" } ?: ""),
-                    )
-                },
-            )
         }
     }
 }
 
 @Composable
-private fun RowMessage(title: String, body: String) {
+private fun ModuleRows(module: ModuleClient.State) {
+    if (module is ModuleClient.State.Failed) RowMessage("错误", module.message)
+    if (module !is ModuleClient.State.Connected) return
+    val m = module.module
+    RowMessage("系统模块", "PID ${m.pid} · UID ${m.uid} · SDK ${m.sdk} · 配置代次 ${m.configGeneration}")
+    RowMessage("能力", "卡片：${capabilityStatus(m.cardControl)} · 通知：${capabilityStatus(m.notificationControl)} · 后台入口：${capabilityStatus(m.wakeControl)}")
+    RowMessage("恢复辅助", m.recovery)
+    m.hooks.forEach { (key, status) ->
+        RowMessage(capabilityLabel(key), capabilityStatus(status) + if (':' in status) " · ${status.substringAfter(':')}" else "")
+    }
+    if (m.flows.isNotEmpty()) RowMessage("操作链", m.flows.joinToString("\n"))
+    if (m.commandResults.isNotEmpty()) RowMessage("命令回执", m.commandResults.entries.toList().takeLast(5).joinToString("\n") { "${it.key}: ${it.value}" })
+    RowMessage("任务来源", m.taskSource)
+    m.lastError?.let { RowMessage("错误", it) }
+}
+
+@Composable
+private fun RowMessage(title: String, body: String? = null) {
     ListItem(
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-        headlineContent = { Text(title) },
-        supportingContent = { Text(body) },
+        headlineContent = { Text(title) }, supportingContent = body?.let { { Text(it) } },
     )
 }

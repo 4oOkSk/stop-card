@@ -40,6 +40,10 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -81,11 +85,26 @@ fun AppsScreen(contentPadding: PaddingValues) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
     val filter by viewModel.filter.collectAsStateWithLifecycle()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
+    val editing by viewModel.editing.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
     var searching by rememberSaveable { mutableStateOf(false) }
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var bulkMode by remember { mutableStateOf<RuleMode?>(null) }
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+
+    LaunchedEffect(notice) {
+        val value = notice ?: return@LaunchedEffect
+        val result = snackbar.showSnackbar(
+            message = value.message,
+            actionLabel = if (value.undo != null) "撤销" else null,
+            withDismissAction = true,
+            duration = SnackbarDuration.Long,
+        )
+        if (result == SnackbarResult.ActionPerformed) viewModel.undo(value)
+        else viewModel.dismissNotice(value)
+    }
 
     BackHandler(enabled = searching) {
         searching = false
@@ -95,6 +114,7 @@ fun AppsScreen(contentPadding: PaddingValues) {
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         contentWindowInsets = WindowInsets(0),
+        snackbarHost = { SnackbarHost(snackbar, Modifier.padding(bottom = contentPadding.calculateBottomPadding())) },
         topBar = {
             TopAppBar(
                 scrollBehavior = scrollBehavior,
@@ -159,14 +179,6 @@ fun AppsScreen(contentPadding: PaddingValues) {
             item(key = "filters") {
                 FilterRow(filter = filter, counts = state.counts, onSelect = { viewModel.filter.value = it })
             }
-            item(key = "hint") {
-                Text(
-                    stringResource(R.string.apps_hint),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                )
-            }
             when {
                 state.loading -> item(key = "loading") {
                     Box(Modifier.fillMaxWidth().padding(48.dp), contentAlignment = Alignment.Center) {
@@ -223,7 +235,7 @@ fun AppsScreen(contentPadding: PaddingValues) {
             },
             confirmButton = {
                 TextButton(
-                    enabled = targets.isNotEmpty(),
+                    enabled = targets.isNotEmpty() && !editing,
                     onClick = {
                         viewModel.decide(targets, mode)
                         bulkMode = null
@@ -297,20 +309,7 @@ private fun AppRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val status = when {
-        item.isProtected -> item.reasons.takeIf { it.isNotEmpty() }?.joinToString("、") { io.github.user4ooksk.stopcard.ui.reasonLabel(it) } ?: stringResource(R.string.app_status_protected)
-        item.cards > 0 -> "有 ${item.cards} 张卡，允许后台运行"
-        item.visible -> "正在使用"
-        item.exempt -> "例外：允许后台运行"
-        item.state == "operation" -> "操作尚未结束：页面、结果或绑定受保护"
-        item.state == "opening" -> "用户正在打开，等待任务确认"
-        item.state == "uncertain" -> "任务来源待确认，暂缓停止"
-        item.state == "pending" -> "无卡，等待复核停止"
-        item.state == "stopped" -> "已停止"
-        item.stopsToday > 0 ->
-            pluralStringResource(R.plurals.app_status_stops_today, item.stopsToday, item.stopsToday)
-        else -> "受卡片规则管理"
-    }
+    val status = item.statusLabel()
     ListItem(
         modifier = modifier.clickable(onClick = onClick),
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),

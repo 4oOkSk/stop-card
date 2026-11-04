@@ -108,8 +108,7 @@ fun HomeScreen(
                 }
                 if (missing.isNotEmpty()) {
                     Text(
-                        "部分功能未启用：" + missing.joinToString("、") + "。" +
-                            if (state.observeOnly || module.module.paused || !module.module.ready) "当前处于观察、暂停或初始化状态。" else "已挂接入口继续执行。",
+                        "部分功能不可用。请在设置中查看诊断。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 12.dp),
@@ -119,9 +118,9 @@ fun HomeScreen(
         }
         item(key = "stats") {
             Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatTile(state.cards, "张有效卡片", Modifier.weight(1f).fillMaxHeight())
-                StatTile(state.operations, "个应用临时放行", Modifier.weight(1f).fillMaxHeight())
-                StatTile(state.stopped, "个应用已停止", Modifier.weight(1f).fillMaxHeight())
+                StatTile(state.cards, "卡片", Modifier.weight(1f).fillMaxHeight())
+                StatTile(state.operations, "临时运行", Modifier.weight(1f).fillMaxHeight())
+                StatTile(state.stopped, "已停止", Modifier.weight(1f).fillMaxHeight())
             }
         }
         if (protection.isActive || state.running.isNotEmpty()) {
@@ -220,9 +219,9 @@ private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> 
         running.stopsAt != null && running.stopsAt > now -> stringResource(R.string.running_stops_in, countdownLabel(running.stopsAt - now))
         running.stopsAt != null -> stringResource(R.string.running_stopping)
         running.cards > 0 -> "有 ${running.cards} 张卡"
-        running.state == "operation" -> "操作、结果或绑定尚未结束"
-        running.state == "opening" -> "正在打开，等待确认"
-        running.state == "uncertain" -> "任务来源待确认"
+        running.state == "operation" -> "临时运行"
+        running.state == "opening" -> "正在打开"
+        running.state == "uncertain" -> "状态待确认"
         else -> stringResource(R.string.running_in_use)
     }
     ListItem(

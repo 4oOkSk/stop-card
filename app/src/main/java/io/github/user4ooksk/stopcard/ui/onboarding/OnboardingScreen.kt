@@ -85,33 +85,23 @@ private fun Welcome() {
     Text("Stop Card", style = MaterialTheme.typography.headlineLarge)
     Text("按最近任务卡片管理后台", style = MaterialTheme.typography.titleMedium)
     Text(
-        "卡片还在，应用就可以继续运行、联网和发通知。划掉最后一张卡后，经过一次很短的复核，再用 Android 的强行停止结束它。",
+        "保留卡片，允许应用运行。移除最后一张卡片后，无其他保护时停止应用。",
         style = MaterialTheme.typography.bodyLarge,
-    )
-    Text(
-        "跨应用操作按可见窗口、页面和服务生命周期临时保护，隐藏后使用短超时兜底。系统电话、桌面、输入法、VPN 等必要组件默认放开。",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
 @Composable
 private fun Setup(module: ModuleClient.State, rootAvailable: Boolean, onRefresh: () -> Unit) {
     Text("准备系统模块", style = MaterialTheme.typography.headlineSmall)
-    Text(
-        "本工具需要在 LSPosed（Vector）中启用，并且只作用于“系统框架”。它不会把作用域扩大到全部应用。",
-        style = MaterialTheme.typography.bodyMedium,
-    )
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("1. 在 Vector 中启用 Stop Card。", style = MaterialTheme.typography.bodyMedium)
+            Text("1. 在 LSPosed 或 Vector 中启用 Stop Card。", style = MaterialTheme.typography.bodyMedium)
             Text("2. 作用域只勾选“系统框架”。", style = MaterialTheme.typography.bodyMedium)
             Text("3. 重启手机。", style = MaterialTheme.typography.bodyMedium)
-            Text("4. 在 KernelSU 中给 Stop Card 授予 Root；界面通过 Root 读取模块状态。", style = MaterialTheme.typography.bodyMedium)
-            Text("5. 可在设置中安装独立恢复辅助；核心卡片规则不依赖其心跳。", style = MaterialTheme.typography.bodyMedium)
+            Text("4. 授予 Stop Card Root 权限。", style = MaterialTheme.typography.bodyMedium)
         }
     }
     StatusRow("Root", rootAvailable, if (rootAvailable) "已授权" else "未授权或不可用")
@@ -123,7 +113,7 @@ private fun Setup(module: ModuleClient.State, rootAvailable: Boolean, onRefresh:
             ModuleClient.State.Waiting -> "等待状态文件"
             is ModuleClient.State.Failed -> module.message
             is ModuleClient.State.Connected -> if (module.module.configLoaded) {
-                "运行中，配置代次 ${module.module.configGeneration}"
+                "配置已加载"
             } else {
                 "已加载，等待配置"
             }
@@ -134,12 +124,12 @@ private fun Setup(module: ModuleClient.State, rootAvailable: Boolean, onRefresh:
 
 @Composable
 private fun Ready(observeOnly: Boolean, onObserveChange: (Boolean) -> Unit) {
-    Text("先观察，还是直接启用？", style = MaterialTheme.typography.headlineSmall)
+    Text("选择模式", style = MaterialTheme.typography.headlineSmall)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("观察模式", style = MaterialTheme.typography.bodyLarge)
             Text(
-                "只记录判断，不拦截、不强停。建议至少观察一天，再关闭观察模式。",
+                "仅记录，不拦截或停止应用。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -147,7 +137,7 @@ private fun Ready(observeOnly: Boolean, onObserveChange: (Boolean) -> Unit) {
         Switch(checked = observeOnly, onCheckedChange = onObserveChange)
     }
     Text(
-        "全部普通应用默认纳入，新安装应用自动纳入；不需要逐个勾选。要放行某个应用，在“应用”页把它设为例外。",
+        "需要持续运行的应用，请在应用页选择“允许后台”。",
         style = MaterialTheme.typography.bodyMedium,
     )
 }

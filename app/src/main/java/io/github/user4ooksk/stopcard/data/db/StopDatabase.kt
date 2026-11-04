@@ -68,6 +68,12 @@ interface RuleDao {
         deleteAll()
         upsert(rules)
     }
+
+    @Transaction
+    suspend fun applyChanges(remove: List<String>, put: List<RuleEntity>) {
+        if (remove.isNotEmpty()) delete(remove)
+        if (put.isNotEmpty()) upsert(put)
+    }
 }
 
 @Dao

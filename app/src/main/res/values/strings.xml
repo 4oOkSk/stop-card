@@ -6,8 +6,8 @@
     <string name="nav_activity">记录</string>
     <string name="nav_settings">设置</string>
     <plurals name="status_active_body">
-        <item quantity="one">%d 个普通应用受管：卡片还在，就允许运行。</item>
-        <item quantity="other">%d 个普通应用受管：卡片还在，就允许运行。</item>
+        <item quantity="one">管理 %d 个应用</item>
+        <item quantity="other">管理 %d 个应用</item>
     </plurals>
     <string name="action_retry">重试</string>
     <string name="action_stop_now">立即停止</string>
@@ -20,12 +20,12 @@
     <string name="action_close_search">关闭搜索</string>
     <string name="action_more">更多选项</string>
     <string name="home_running">正在运行</string>
-    <string name="home_running_empty">当前没有正在运行的应用。</string>
+    <string name="home_running_empty">暂无运行应用</string>
     <string name="running_in_use">正在使用</string>
     <string name="running_stops_in">%1$s 后停止</string>
     <string name="running_stopping">正在停止…</string>
     <string name="home_recent">最近记录</string>
-    <string name="home_recent_empty">暂无记录。模块的判断和执行结果会显示在这里。</string>
+    <string name="home_recent_empty">暂无记录</string>
     <string name="time_just_now">刚刚</string>
     <string name="time_minutes_ago">%d 分钟前</string>
     <string name="time_hours_ago">%d 小时前</string>
@@ -33,16 +33,10 @@
     <string name="time_yesterday">昨天</string>
     <string name="apps_title">应用</string>
     <string name="apps_search_hint">搜索应用</string>
-    <string name="apps_hint">普通应用默认全部受管。打开“例外”开关表示允许它长期后台运行。</string>
-    <string name="app_status_protected">必要组件，允许后台运行</string>
-    <plurals name="app_status_stops_today">
-        <item quantity="one">今日停止 %d 次</item>
-        <item quantity="other">今日停止 %d 次</item>
-    </plurals>
     <string name="app_system_badge">系统</string>
     <string name="menu_show_system">显示系统应用</string>
-    <string name="menu_block_shown">取消所列应用的例外</string>
-    <string name="menu_allow_shown">将所列应用设为例外</string>
+    <string name="menu_block_shown">所列应用按卡片管理</string>
+    <string name="menu_allow_shown">所列应用允许后台</string>
     <string name="apps_empty_search">没有匹配“%1$s”的应用</string>
     <string name="apps_empty_filter">暂无应用</string>
     <plurals name="apps_bulk_confirm_block">
@@ -50,11 +44,10 @@
         <item quantity="other">将 %d 个应用恢复为按卡片管理？</item>
     </plurals>
     <plurals name="apps_bulk_confirm_allow">
-        <item quantity="one">允许 %d 个应用长期后台运行？</item>
-        <item quantity="other">允许 %d 个应用长期后台运行？</item>
+        <item quantity="one">允许 %d 个应用后台运行？</item>
+        <item quantity="other">允许 %d 个应用后台运行？</item>
     </plurals>
-    <string name="apps_bulk_confirm">应用</string>
-    <string name="detail_protected">必要组件由模块自动放行。</string>
+    <string name="apps_bulk_confirm">修改</string>
     <string name="detail_activity">运行记录</string>
     <plurals name="detail_stops_today">
         <item quantity="one">今日停止 %d 次</item>
@@ -72,7 +65,7 @@
         <item quantity="other">停止 %d 次</item>
     </plurals>
     <string name="activity_empty_title">暂无记录</string>
-    <string name="activity_empty_body">模块的判断和执行结果会显示在这里。</string>
+    <string name="activity_empty_body">暂无运行记录</string>
     <string name="menu_clear_history">清除记录</string>
     <string name="activity_repeat">×%d</string>
     <string name="activity_chart_description">最近 7 天每日停止次数</string>

@@ -37,10 +37,14 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -68,6 +72,7 @@ fun AppDetailSheet(
     val packageName = item.app.packageName
     val history by remember(packageName) { viewModel.history(packageName) }.collectAsStateWithLifecycle(emptyList())
     val versionName = remember(packageName) { context.graph.apps.versionName(packageName) }
+    var showReasons by rememberSaveable(packageName) { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -96,27 +101,38 @@ fun AppDetailSheet(
             }
             Spacer(Modifier.height(24.dp))
 
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(item.statusLabel(), Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                TextButton(onClick = { showReasons = !showReasons }) {
+                    Text(if (showReasons) "收起原因" else "查看原因")
+                }
+            }
+            if (showReasons) {
+                item.statusDetails().forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+            }
+            Spacer(Modifier.height(12.dp))
+
             if (item.isProtected) {
-                Notice(Icons.Rounded.Shield, item.reasons.takeIf { it.isNotEmpty() }?.joinToString("、") { io.github.user4ooksk.stopcard.ui.reasonLabel(it) } ?: stringResource(R.string.detail_protected))
+                Notice(Icons.Rounded.Shield, "自动保护")
             } else {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = item.managed,
                         onClick = { viewModel.setAllowed(packageName, false) },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text("按卡片规则", maxLines = 1) }
+                    ) { Text("按卡片管理", maxLines = 1) }
                     SegmentedButton(
                         selected = item.exempt,
                         onClick = { viewModel.setAllowed(packageName, true) },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text("例外：允许后台", maxLines = 1) }
+                    ) { Text("允许后台", maxLines = 1) }
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
                     if (item.managed) {
-                        "有效卡片保留时允许后台运行。没有卡片时，相关操作页面、结果回传和必要绑定继续受保护；满足结束条件后才复核停止。"
+                        "无卡片且无其他保护时停止应用。"
                     } else {
-                        "该应用不按卡片规则停止。用于微信、音乐、导航等你明确要长期放行的应用。"
+                        "不受卡片规则限制。"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -55,7 +55,7 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
     fun clearHistory() {
         viewModelScope.launch {
             graph.events.clear()
-            maintenance.value = if (graph.module.clearModuleLog()) "已提交模块日志清除请求，处理结果见命令回执" else "模块日志清除请求未提交"
+            maintenance.value = if (graph.module.clearModuleLog()) "本地记录已清除，模块记录等待清除。" else "本地记录已清除，模块记录清除失败。"
         }
     }
 
@@ -74,7 +74,11 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
                     }
                     else -> false
                 }
-                if (ok) "已提交恢复操作。监测确认和锁定状态见模块状态；解除锁定后仍保持暂停。" else "恢复操作未完成，请检查 Root 授权和诊断信息。"
+                if (ok) when (action) {
+                    "install" -> "恢复辅助已安装，请重启手机。"
+                    "disable" -> "已写入锁定暂停请求，请检查首页状态。"
+                    else -> "已提交解除请求，保持暂停和观察模式。请检查诊断。"
+                } else "操作未完成，请检查 Root 权限和诊断。"
             }.getOrElse { it.message ?: "恢复操作失败" }
             busy.value = false
             graph.module.refresh()
@@ -83,7 +87,7 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun resetExceptions() {
         viewModelScope.launch {
-            graph.rules.delete(graph.rules.all().keys)
+            graph.rules.clearExceptions()
         }
     }
 }

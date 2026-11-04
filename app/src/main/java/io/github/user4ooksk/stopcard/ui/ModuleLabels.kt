@@ -30,7 +30,7 @@ fun capabilityLabel(key: String): String = when (key) {
     "alarm" -> "闹钟交付"
     "pending_intent" -> "延迟操作"
     "process" -> "进程启动"
-    "extra_keep_alive" -> "有卡额外保活"
+    "extra_keep_alive" -> "减少有卡应用回收"
     else -> when {
         key.startsWith("stop_") -> "停止前会话复核"
         key.startsWith("widget_") -> "小组件添加与移除"
