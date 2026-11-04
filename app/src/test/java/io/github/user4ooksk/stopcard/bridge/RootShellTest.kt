@@ -28,22 +28,40 @@ class RootShellTest {
         assumeTrue(flock.startsWith("/") && File(flock).canExecute())
         bin = folder.newFolder("bin")
         File(bin, "chown").apply { writeText("#!/bin/sh\nexit 0\n"); setExecutable(true) }
-        // Reproduce a shell/tool boundary that drops FD 9 before invoking flock.
+        // Match Toybox's FD-only interface and reproduce loss of higher inherited FDs.
         File(bin, "flock").apply {
-            writeText("#!/bin/sh\nexec 9>&-\nexec '$flock' \"\$@\"\n")
+            writeText("""
+                |#!/bin/sh
+                |if test "${'$'}#" != 2 || test "${'$'}1" != -n; then
+                |    echo "flock: Unknown option 'c'" >&2
+                |    exit 1
+                |fi
+                |case "${'$'}2" in
+                |    ''|*[!0-9]*) echo 'flock: expected fd' >&2; exit 1 ;;
+                |esac
+                |exec 9>&-
+                |exec '$flock' "${'$'}@"
+            """.trimMargin() + "\n")
             setExecutable(true)
         }
         config = File(folder.root, "control with 'quote/config.json")
     }
 
     @Test
-    fun `initial configuration works when flock cannot inherit descriptor nine`() {
+    fun `initial configuration uses fd only and works when descriptor nine is lost`() {
         config.parentFile.mkdirs()
         val old = shell("exec 9> '${File(folder.root, "old.lock").path}'; flock -n 9")
         old.outputStream.close()
         val failure = finish(old)
         assertTrue(failure.first != 0)
         assertTrue(failure.second.contains("Bad file descriptor", ignoreCase = true))
+
+        val unsupported = shell("flock -n '${File(folder.root, "old.lock").path}' sh -c 'echo wrong'")
+        unsupported.outputStream.close()
+        val pathFailure = finish(unsupported)
+        assertEquals(1, pathFailure.first)
+        assertTrue(pathFailure.second.contains("Unknown option 'c'"))
+        assertFalse(pathFailure.second.contains("wrong"))
 
         val text = "{\"configGeneration\":1,\"note\":\"配置\"}\n"
         assertEquals(0, write(text, null).first)
@@ -89,6 +107,38 @@ class RootShellTest {
         val results = listOf(finish(first).first, finish(second).first)
         assertEquals(1, results.count { it == 0 })
         assertTrue(config.readText() in setOf("first", "second"))
+        assertFalse(config.parentFile.listFiles()!!.any { it.name.endsWith(".tmp") })
+    }
+
+    @Test
+    fun `writer keeps the inherited stdin lock until the replacement finishes`() {
+        assertEquals(0, write("initial", null).first)
+        val entered = File(folder.root, "entered")
+        val release = File(folder.root, "release")
+        val move = ProcessBuilder("sh", "-c", "command -v mv").start()
+            .inputStream.bufferedReader().use { it.readText().trim() }
+        File(bin, "mv").apply {
+            writeText("""
+                |#!/bin/sh
+                |touch '${entered.path}'
+                |while ! test -e '${release.path}'; do sleep 0.05; done
+                |exec '$move' "${'$'}@"
+            """.trimMargin() + "\n")
+            setExecutable(true)
+        }
+        val first = startWrite("first", "initial")
+        try {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!entered.exists() && first.isAlive && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue("The first writer must reach rename", entered.exists())
+            assertEquals(75, write("second", "initial").first)
+            assertEquals("initial", config.readText())
+        } finally {
+            release.createNewFile()
+            if (!first.waitFor(5, TimeUnit.SECONDS)) first.destroyForcibly()
+        }
+        assertEquals(0, first.exitValue())
+        assertEquals("first", config.readText())
         assertFalse(config.parentFile.listFiles()!!.any { it.name.endsWith(".tmp") })
     }
 

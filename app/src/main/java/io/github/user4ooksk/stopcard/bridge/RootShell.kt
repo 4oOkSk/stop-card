@@ -129,27 +129,30 @@ class RootShell {
             fi
             test "${'$'}sc_hash" = ${quote(expected)} || exit 74
         """.trimIndent()
-        val writer = """
-            set -eu
-            sc_tmp=${quote(tmp)}
-            trap 'rm -f "${'$'}sc_tmp"' EXIT
-            $compare
-            cat > "${'$'}sc_tmp"
-            chown 0:1000 "${'$'}sc_tmp"
-            chmod 0640 "${'$'}sc_tmp"
-            restorecon ${quote(dir)} "${'$'}sc_tmp" 2>/dev/null || true
-            mv -f "${'$'}sc_tmp" ${quote(path)}
+        // Toybox accepts an FD only. FD 0 survives exec even when a shell closes higher FDs.
+        // Receive the JSON first; the subshell then owns the lock FD until after the rename.
+        val replace = if (expected == null) "mv -f \"${'$'}sc_tmp\" ${quote(path)}" else """
+            touch ${quote("$dir/config.lock")}
+            chmod 0600 ${quote("$dir/config.lock")}
+            (
+                flock -n 0 || exit 75
+                $compare
+                mv -f "${'$'}sc_tmp" ${quote(path)}
+            ) < ${quote("$dir/config.lock")}
         """.trimIndent()
-        // Let flock open the file instead of relying on shell/tool descriptor inheritance.
-        val write = if (expected == null) writer else
-            "exec flock -n ${quote("$dir/config.lock")} sh -c ${quote(writer)}"
         return """
             set -eu
             umask 077
             mkdir -p ${quote(dir)}
             chown 0:1000 ${quote(dir)}
             chmod 0770 ${quote(dir)}
-            $write
+            sc_tmp=${quote(tmp)}
+            trap 'rm -f "${'$'}sc_tmp"' EXIT
+            cat > "${'$'}sc_tmp"
+            chown 0:1000 "${'$'}sc_tmp"
+            chmod 0640 "${'$'}sc_tmp"
+            restorecon ${quote(dir)} "${'$'}sc_tmp" 2>/dev/null || true
+            $replace
         """.trimIndent()
     }
 
