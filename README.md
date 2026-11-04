@@ -1,83 +1,65 @@
 # Stop Card
 
-按最近任务卡片管理 Android 后台。有效卡片保留时允许运行；最后一张卡移除后，无可见窗口、操作流程或例外保护时，经短复核强行停止。
+按最近任务卡片管理 Android 后台。
 
-由 [4oOkSk](https://github.com/4oOkSk) 维护，基于 [burakgon/stop](https://github.com/burakgon/stop) 的 `51c6b61c1988750821edeb36e05831726bcb1f24`，沿用 GPL-3.0。独立包名：`io.github.user4ooksk.stopcard`。
+应用保留有效卡片时，Stop Card 允许它运行。最后一张卡片移除后，模块检查其他保护条件。没有保护条件时，模块调用 Android 的强行停止功能。
 
-## 当前版本
+[下载 APK](https://github.com/4oOkSk/stop-card/releases) · [运行规则](docs/design.md) · [构建说明](docs/build.md) · [设备验收](docs/device-tests.md)
 
-0.2.5 开发版本，目标为 Android 17。完整需求与验收用例见 [设计书](docs/design.md)。
-设备步骤与记录要求见 [设备验收](docs/device-tests.md)。
+## 使用前确认
 
-- 全局默认管理普通应用，新装应用自动纳入；用户例外绑定安装身份。
-- 核心处理有效卡片和原生强停；跨应用保护采用可见窗口、Activity／Service 生命周期与隐藏后 30 秒兜底。
-- 覆盖通知入队、Activity、Service、广播、Provider、Job、闹钟、PendingIntent 和进程启动入口。设备上的实际可用入口显示在设置中；不匹配的能力降级放行。
-- 模块独立维护必要角色，系统预装包默认放开；应用页可查看例外原因。
-- 默认观察模式；可选恢复辅助监测启动失败、异常重启和模块心跳，核心运行不依赖其心跳。
-- 额外保活可选，默认关闭，仅调整 Android 缓存进程范围内的优先级。
+- 当前版本为 **0.2.5 开发预发布**，适配目标为 Android 17。
+- 安装要求为 Android 17（API 37）或更高版本。更高版本仍需单独验证。
+- 需要 Root、Zygisk，以及兼容目标系统的 LSPosed 或 Vector。
+- 当前只管理主用户。工作资料和其他用户不受管理。
 
-模块运行在 `system_server`，不依赖 Shizuku。Root 用于按需配置、诊断和恢复；恢复辅助不参与日常应用判断。
+## 安装与启用
 
-## 安装
+1. 从发布页下载并安装 APK。
+2. 在模块管理器中启用 **Stop Card**。
+3. 将作用域设为 **系统框架**。
+4. 重启手机。
+5. 打开 Stop Card，授予 Root 权限并完成引导。
+6. 保持 **观察模式**，检查设置中的模块状态和配置确认。
+7. 确认模块就绪后，开启 **卡片规则**，关闭 **观察模式**。
 
-需要 Android 17（API 37）或更高版本、Root、Zygisk 和支持目标系统的 LSPosed／Vector。当前仅管理主用户。
+更新 APK 后，再次确认模块已启用，然后重启。
 
-1. 安装 APK。在框架中启用 **Stop Card**，作用域只选 **系统框架**，随后重启。
-2. 授予 Stop Card Root，完成引导并保持观察模式。
-3. 确认卡片核心和配置代次已就绪，可关闭观察模式测试强停；通知、唤醒和保活按各自挂接状态工作。
-4. 需要独立恢复监测时，在设置中安装恢复辅助；更新已运行的辅助时按提示重启。
+## 日常使用
 
-系统重启后的历史卡片不自动激活；用户重新打开后才获得本次卡片许可。已激活会话中实际显示过的同应用文档任务，也计入有效卡；移除其中一张不会撤销其余卡片的通知与后台许可。跨应用触摸来源经系统窗口、UID 和 Activity 核验后，仅确认一秒内指向一个目标包的调用，不激活目标的持久卡片；已确认流程中的服务等依赖按具体组件放行。来源未确认的调用按具体目标临时观察，包括尚未核验的键盘／无障碍路径。跨应用流程保留窗口与生命周期保护；隐藏后超时撤销临时许可，再检查卡片、可见性和例外。本版不追踪应用内部结果回调是否执行完成。
+| 需要完成的事 | 操作与结果 |
+|---|---|
+| 让普通应用继续运行 | 保留有效卡片。 |
+| 停止普通应用 | 移除最后一张卡片。模块在其他保护结束后复核并强停。 |
+| 让应用在无卡时继续运行 | 在应用页添加用户例外。 |
+| 使用桌面小组件 | 保留小组件。所属应用可在无卡时刷新，也可通过点击唤醒。 |
+| 使用快捷开关或 VPN | 正常操作。模块保护已核验的系统绑定和当前 VPN。 |
+| 临时停止管控 | 点击首页的暂停按钮。 |
 
-强停在模块工作线程完成轻量复核后直接调用系统接口，由 Android 自己管理锁和清理过程。
+重启后的历史卡片不自动获得运行许可。重新打开应用后，模块才激活本次卡片。
 
-SystemUI 绑定快捷开关、系统进程绑定 VPN 服务时，模块核验调用身份、实际组件与系统绑定权限。绑定保护持续到原生解绑与服务销毁完成，不受普通操作链的隐藏超时限制。同包服务等依赖按实际组件临时观察，隐藏后使用固定的短超时，重复回调不能续期；这类操作不激活持久卡片。活跃 VPN 的所属应用从主用户的原生 VPN 配置读取。
+音乐、下载和通讯应用也按卡片规则管理。需要持续运行或接收消息时，请保留卡片或添加例外。
 
-实际添加的桌面小组件按应用保护，允许无卡刷新；移除最后一个小组件后重新复核其他许可。桌面快捷方式保留直接打开来源，桌面发送的 PendingIntent 按最终目标临时观察，支持从小组件唤醒应用。
+卡片许可表示 Stop Card 不主动停止应用。Android 仍可回收进程。**有卡额外保活**默认关闭，也不保证进程常驻。
 
-## 暂停与恢复
+## 暂停与故障恢复
 
-首页暂停会取消待执行停止和额外保活。界面不可用时，已安装的恢复辅助提供独立入口：
+能打开管理界面时，先点击首页暂停。需要独立恢复入口时，可在设置中安装恢复辅助。
+
+已安装恢复辅助后，可通过有 Root 权限的 ADB 执行：
 
 ```sh
 adb shell su -c 'sh /data/adb/stop_card_recovery/disable.sh'
 ```
 
-如模块无法响应，在框架中停用 Stop Card 后重启。设置中的重新准备恢复功能会保留暂停与观察模式，不自动恢复严格拦截。已被系统强停的应用需重新打开，暂停不会自动恢复其推送。
+此命令写入紧急停用标记。模块有响应时会暂停；下次系统进程启动时会跳过执行挂钩。
 
-配置与状态位于 `/data/system/stop_card`。控制文件由 Root 持有且仅 Root 可写；模块核对主用户、管理 APK 签名、协议与配置代次。界面仅将模块确认的修改显示为生效。文件访问、SELinux 和独立恢复入口须在目标设备核验。
+如果系统或框架无法响应，请在模块管理器中停用 Stop Card，然后重启。重新准备恢复辅助后，按界面提示检查暂停和观察模式。
 
-## 构建
+暂停不会自动恢复已被强停应用的推送。请重新打开这些应用。
 
-需要 JDK 21、Android SDK 37 与 Build Tools 37。使用平台包目录带小版本号的 SDK 时：
+## 数据与许可证
 
-```sh
-sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
-ln -sfn android-37.0 "$ANDROID_HOME/platforms/android-37"
-./gradlew :app:testDebugUnitTest
-./gradlew :app:assembleDebug
-./gradlew :app:assembleRelease
-./gradlew :testbed:assembleDebug
-```
+日志记录包名、事件和原因，不记录消息正文或支付参数。日志滚动保留 7 天，并限制容量。诊断信息包含运行状态，分享前请检查内容。
 
-签名配置从未提交的 `keystore.properties` 读取：
-
-```properties
-storeFile=signing/release.p12
-storePassword=YOUR_STORE_PASSWORD
-keyAlias=release
-keyPassword=YOUR_KEY_PASSWORD
-```
-
-发布版本使用固定签名，构建时将证书摘要写入模块。未配置签名时不生成可直接分发的签名 release 包；签名未核验时仅观察。APK、源码版本及校验值一并发布。
-
-## 源码
-
-- `app/src/main/java/io/github/user4ooksk/stopcard/policy/`：纯规则核心。
-- `app/src/main/java/io/github/user4ooksk/stopcard/module/`：系统接口适配、状态与执行。
-- `app/src/main/java/io/github/user4ooksk/stopcard/bridge/`：按需 Root 通信和恢复安装。
-- `app/src/main/java/io/github/user4ooksk/stopcard/ui/`：管理界面。
-- `app/src/test/`：离线回归测试。
-- `testbed/`：A／B／C 三个可控测试包，独立于管理 APK。
-
-日志只保留包名、事件和原因，滚动保留 7 天并限制容量；不记录消息正文或支付参数，无广告或统计。诊断导出含设备运行信息，分享前可自行检查。
+由 [4oOkSk](https://github.com/4oOkSk) 维护，基于 [burakgon/stop 的固定提交](https://github.com/burakgon/stop/tree/51c6b61c1988750821edeb36e05831726bcb1f24)。项目使用 [GPL-3.0 许可证](LICENSE)。独立包名为 `io.github.user4ooksk.stopcard`。
