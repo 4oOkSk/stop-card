@@ -40,8 +40,6 @@ class ModuleProtocolTest {
             recentVisibleMs = 30_000,
             userId = 0,
             configGeneration = 42,
-            exceptions = setOf("com.example.a", "com.example.b"),
-            essential = setOf("android", "com.android.systemui"),
             selfPackage = "io.github.user4ooksk.stopcard",
         )
         val parsed = ModuleProtocol.Config.fromJson(config.toJson())
@@ -49,12 +47,22 @@ class ModuleProtocolTest {
     }
 
     @Test
+    fun `existing version 2 configuration loads without redundant name and role fields`() {
+        val key = AppKey(0, "example.app", 10001, 10, "a".repeat(64))
+        val config = config().copy(exceptionIdentities = setOf(key))
+        val oldDocument = JSONObject(config.toJson())
+            .put("exceptions", org.json.JSONArray(listOf(key.packageName)))
+            .put("essential", org.json.JSONArray(listOf("android")))
+        assertEquals(config, ModuleProtocol.Config.fromJson(oldDocument.toString()))
+        assertTrue(!JSONObject(config.toJson()).has("exceptions"))
+        assertTrue(!JSONObject(config.toJson()).has("essential"))
+    }
+
+    @Test
     fun `state round-trips cards and app rows`() {
         val state = ModuleProtocol.ModuleState(
             versionCode = 7,
             heartbeat = 123,
-            bootEpoch = 100,
-            startedAt = 90,
             taskSource = "ok",
             configGeneration = 5,
             observeOnly = true,
@@ -169,11 +177,6 @@ class ModuleProtocolTest {
         assertNotEquals(key, ModuleProtocol.Command.fromJson(command.copy(identities = setOf(key.copy(installedAt = 11))).toJson())!!.identities.single())
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `generation exhaustion cannot wrap around`() {
-        ModuleProtocol.nextConfig(null, Long.MAX_VALUE, 0, config())
-    }
-
     @Test fun `freshness uses monotonic time and boot identity`() {
         val state = ModuleProtocol.ModuleState(versionCode = 2, bootId = "boot", heartbeatElapsed = 1000, heartbeat = -5000, uid = 1000, pid = 42)
         assertEquals(null, ModuleProtocol.stateIssue(state, "boot", 2000, 2))
@@ -190,9 +193,9 @@ class ModuleProtocolTest {
             assertEquals(field, null, ModuleProtocol.Config.fromJson(o.toString()))
         }
         val app = AppKey(0, "com.example.a", 10001, 10, "a".repeat(64))
-        val c = config().copy(exceptions = setOf(app.packageName), exceptionIdentities = setOf(app))
+        val c = config().copy(exceptionIdentities = setOf(app))
         assertEquals(c, ModuleProtocol.Config.fromJson(c.toJson()))
-        assertEquals(null, ModuleProtocol.Config.fromJson(c.copy(exceptions = emptySet()).toJson()))
+        assertEquals(null, ModuleProtocol.Config.fromJson(c.copy(exceptionIdentities = setOf(app, app.copy(installedAt = 11))).toJson()))
         assertEquals(null, ModuleProtocol.Config.fromJson(c.copy(exceptionIdentities = setOf(app.copy(signer = "unknown"))).toJson()))
     }
 

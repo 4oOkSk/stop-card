@@ -1,6 +1,5 @@
 package io.github.user4ooksk.stopcard.module
 
-import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -49,9 +48,7 @@ object ModuleRuntime : FrameworkCallbacks {
     @Volatile private var ready = false
     @Volatile private var paused = true
     @Volatile private var lastError: String? = null
-    @Volatile private var guardReady = false
     @Volatile private var channelReady = false
-    @Volatile private var overflow = false
     @Volatile private var lastProgress = 0L
     private var attached = false
     private var hooksInstalled = false
@@ -59,7 +56,6 @@ object ModuleRuntime : FrameworkCallbacks {
     private var context: Context? = null
     private var systemFacts: SystemFacts? = null
     private var boot = ""
-    private var startedAt = 0L
     private var lastInventoryAt = 0L
     private var lastStateAt = 0L
     private var lastConfigText: String? = null
@@ -87,12 +83,11 @@ object ModuleRuntime : FrameworkCallbacks {
     @Synchronized fun attach(loader: ClassLoader) {
         if (attached) return
         attached = true
-        startedAt = System.currentTimeMillis()
         boot = runCatching { File("/proc/sys/kernel/random/boot_id").readText().trim() }.getOrDefault("")
         // The independent recovery marker is read before any enforcement hook is installed.
         paused = store.paused()
         adapter = FrameworkAdapter(loader, boot, this)
-        if (!paused && Build.VERSION.SDK_INT >= 37 && boot.isNotBlank()) {
+        if (!paused && boot.isNotBlank()) {
             adapter.install()
             hooksInstalled = true
         }
@@ -155,15 +150,15 @@ object ModuleRuntime : FrameworkCallbacks {
         if (!roleObserverReady && now() - lastRoleAttempt >= 30_000) watchRoles(context!!)
         paused = store.paused()
         policy.pause(paused, now())
-        if (!hooksInstalled && !paused && Build.VERSION.SDK_INT >= 37 && boot.isNotBlank()) {
+        if (!hooksInstalled && !paused && boot.isNotBlank()) {
             adapter.install()
             hooksInstalled = true
         }
         readConfig()
-        runCatching { refreshRecovery() }.onFailure { guardReady = false; recovery = "unavailable" }
+        runCatching { refreshRecovery() }.onFailure { recovery = "unavailable" }
         if (!factsFresh || now() - lastInventoryAt >= 30_000) refreshFacts()
         configure()
-        if (current == null || overflow || Build.VERSION.SDK_INT < 37 || boot.isBlank()) {
+        if (current == null || boot.isBlank()) {
             ready = false
             policy.unknown(now())
             return
@@ -189,8 +184,7 @@ object ModuleRuntime : FrameworkCallbacks {
         launches.entries.removeAll { it.value !in liveFlows }
         activeActivities.values.forEach { it.retainAll(liveFlows) }
         activeActivities.entries.removeAll { it.value.isEmpty() }
-        val systemReady = isBootComplete() && factsFresh
-        ready = systemReady && coreHooksReady()
+        ready = factsFresh && coreHooksReady()
         appliedGeneration = if (ready && channelReady) current?.configGeneration ?: -1 else -1
         taskSource = if (ready) "ok" else "initializing"
         if (!ready) policy.unknown(now())
@@ -267,12 +261,15 @@ object ModuleRuntime : FrameworkCallbacks {
     private fun refreshRecovery() {
         val text = store.control(ModuleProtocol.RECOVERY_STATE, 16 * 1024)
         val state = text?.let { runCatching { JSONObject(it) }.getOrNull() }
-        guardReady = state != null && state.optInt("protocol") == ModuleProtocol.VERSION && state.optString("boot") == boot && state.optString("status") == "watching" &&
+        val watching = state != null && state.optInt("protocol") == ModuleProtocol.VERSION && state.optString("boot") == boot && state.optString("status") == "watching" &&
             now() - state.optLong("elapsed", -60_000) in 0..20_000
-        recovery = if (guardReady) "watching" else if (text == null) "not_installed" else "stale_or_paused"
+        recovery = if (watching) "watching" else if (text == null) "not_installed" else "stale_or_paused"
     }
 
-    private fun coreHooksReady(): Boolean = CORE.all { adapter.report()[it]?.status == "installed" }
+    private fun coreHooksReady(): Boolean {
+        val hooks = adapter.report()
+        return CORE.all { hooks[it]?.status == "installed" }
+    }
     private fun enforcing(): Boolean = now() - lastProgress in 0..5_000 && ready && factsFresh && !paused && channelReady && current?.let { it.enabled && !it.observeOnly } == true
 
     private fun execute(ticket: StopTicket): String {
@@ -290,11 +287,9 @@ object ModuleRuntime : FrameworkCallbacks {
             configure()
             paused = store.paused()
             policy.pause(paused, now())
-            if (systemFacts?.currentIdentity(ticket.app.packageName) != ticket.app || !enforcing() || !policy.valid(ticket)) return "canceled"
+            if (systemFacts?.currentIdentity(ticket.app.packageName) != ticket.app || !enforcing()) return "canceled"
             val group = facts?.groups?.get(ticket.app.uid) ?: return "identity_unknown"
-            if (ticket.app.uid < 10000 || group.any { pkg ->
-                    pkg in facts!!.essential || (pkg != ticket.app.packageName && policy.views().any { it.app.packageName == pkg && it.state !in setOf("managed", "pending", "stopped") })
-                }) {
+            if (ticket.app.uid < 10000 || !policy.valid(ticket, group)) {
                 policy.completed(ticket, false, false, now())
                 store.event(ticket.app.packageName, "blocked", "shared_uid_or_role")
                 return "protected"
@@ -331,7 +326,7 @@ object ModuleRuntime : FrameworkCallbacks {
             if (source != null && source.packageName != target.packageName) {
                 val existing = policy.flowFor(source.packageName, source.token)
                 val flow = if (existing != null && policy.extendFlow(existing, source.packageName, target, true, at)) existing
-                    else policy.beginFlow(source.packageName, source.token, target, fact.evidence, at)
+                    else policy.beginFlow(source.packageName, source.token, target, at)
                 if (flow != null) {
                     launches[fact.target.token] = flow
                 }
@@ -346,8 +341,8 @@ object ModuleRuntime : FrameworkCallbacks {
         }
         if (source != null && source.packageName != target.packageName && (source.visible || fact.observed)) {
             // Source visibility is not user authorization. Observe the unresolved call and hold
-            // only its actual Activity/result/binding chain, without activating a card.
-            val flow = policy.observeFlow(source.packageName, source.token, target, at)
+            // only its actual Activity/binding chain, without activating a card.
+            val flow = policy.beginFlow(source.packageName, source.token, target, at, observed = true)
             if (flow != null) {
                 launches[fact.target.token] = flow
                 logLimited(target.packageName, "observe", "activity_origin_unconfirmed")
@@ -372,7 +367,7 @@ object ModuleRuntime : FrameworkCallbacks {
                 policy.flowActivity(flow, fact.target.token, true, now())
             }
         } else if (flow != null) {
-            policy.finishFlow(flow, true, now())
+            policy.finishFlow(flow, now())
         }
         wake()
     }
@@ -380,7 +375,7 @@ object ModuleRuntime : FrameworkCallbacks {
     override fun window(fact: ActivityFact) {
         if (fact.uid / 100000 != 0) return
         // Teardown produced by our own native stop is not a new user decision. A concurrent open
-        // on another thread still changes the revision and invalidates the stop fences.
+        // on another thread still changes the revision checked before the native call.
         if (!fact.visible && inFlight.get()?.app?.packageName == fact.packageName) { wake(); return }
         if (defer(fact.packageName, fact.uid) { window(fact) }) return
         policy.visible(fact.packageName, fact.task, fact.visible, now(), fact.token)
@@ -407,7 +402,7 @@ object ModuleRuntime : FrameworkCallbacks {
         policy.sourceActivityRemoved(token, now())
         for (flow in activeActivities.remove(token).orEmpty()) {
             policy.flowActivity(flow, token, false, now())
-            policy.finishFlow(flow, false, now())
+            policy.finishFlow(flow, now())
         }
         wake()
     }
@@ -420,8 +415,7 @@ object ModuleRuntime : FrameworkCallbacks {
             val flow = policy.flowFor(caller.packageName)
             if (flow != null) policy.dependency(flow, caller.packageName, target, now())
             if (policy.flowForCall(caller, target) == null && (evidence != null || observed || policy.isVisible(caller.packageName))) {
-                if (evidence != null) policy.beginFlow(caller.packageName, null, target, evidence, now())
-                else policy.observeFlow(caller.packageName, null, target, now())
+                policy.beginFlow(caller.packageName, null, target, now(), observed = evidence == null)
             }
             result = policy.entry(userId, target, now(), caller)
         }
@@ -442,7 +436,7 @@ object ModuleRuntime : FrameworkCallbacks {
             val existing = policy.flowFor(caller.packageName)
             if (existing != null) policy.dependency(existing, caller.packageName, target, now())
             policy.flowForCall(caller, target)?.let { flow ->
-                if (policy.bind(flow, token, target, now(), caller)) policy.finishFlow(flow, false, now())
+                if (policy.bind(flow, token, target, now(), caller)) policy.finishFlow(flow, now())
             }
         }
         wake()
@@ -451,7 +445,7 @@ object ModuleRuntime : FrameworkCallbacks {
     override fun component(token: String, source: String?, target: CallTarget, added: Boolean) {
         if (!added) {
             activityFinished(token)
-            source?.let { facts?.apps?.get(it) }?.let { caller -> policy.flowForCall(caller, target)?.let { policy.finishFlow(it, true, now()) } }
+            source?.let { facts?.apps?.get(it) }?.let { caller -> policy.flowForCall(caller, target)?.let { policy.finishFlow(it, now()) } }
             return
         }
         val caller = source?.let { facts?.apps?.get(it) } ?: return
@@ -535,8 +529,6 @@ object ModuleRuntime : FrameworkCallbacks {
             heartbeat = System.currentTimeMillis(),
             heartbeatElapsed = now(),
             bootId = boot,
-            bootEpoch = System.currentTimeMillis() - now(),
-            startedAt = startedAt,
             taskSource = taskSource,
             configGeneration = c?.configGeneration ?: -1,
             configLoaded = c != null,
@@ -662,7 +654,7 @@ object ModuleRuntime : FrameworkCallbacks {
         // real identity is loaded, then discard it if it belongs to an old installation/UID.
         factsFresh = false
         ready = false
-        if (!pendingFacts.offer { if (matches()) action() }) overflow = true
+        if (!pendingFacts.offer { if (matches()) action() }) logLimited(SELF, "error", "pending_events_full")
         wake()
         return true
     }

@@ -21,8 +21,6 @@ class RulesRepository(private val dao: RuleDao, private val identity: (String) -
 
     suspend fun all(): Map<String, AppRule> = dao.all().associate { it.packageName to it.toModel() }
 
-    suspend fun get(packageName: String): AppRule? = dao.get(packageName)?.toModel()
-
     /** An [RuleMode.ALLOW] row is an exception; [RuleMode.BLOCK] removes the exception. */
     suspend fun decide(packageNames: Collection<String>, mode: RuleMode) {
         if (packageNames.isEmpty()) return
@@ -30,11 +28,10 @@ class RulesRepository(private val dao: RuleDao, private val identity: (String) -
             dao.delete(packageNames.toList())
             return
         }
-        val existing = dao.all().associateBy { it.packageName }
         val now = System.currentTimeMillis()
         val records = withContext(Dispatchers.IO) { packageNames.mapNotNull { pkg ->
             val app = identity(pkg) ?: return@mapNotNull null
-            RuleEntity(pkg, RuleMode.ALLOW.name, decided = true, graceSeconds = existing[pkg]?.graceSeconds, updatedAt = now,
+            RuleEntity(pkg, RuleMode.ALLOW.name, decided = true, graceSeconds = null, updatedAt = now,
                 userId = app.userId, uid = app.uid, installedAt = app.installedAt, signer = app.signer)
         } }
         dao.upsert(records)
@@ -56,10 +53,7 @@ class RulesRepository(private val dao: RuleDao, private val identity: (String) -
 
     private fun RuleEntity.toModel() = AppRule(
         packageName = packageName,
-        mode = runCatching { RuleMode.valueOf(mode) }.getOrDefault(RuleMode.ALLOW),
-        decided = decided,
-        graceSeconds = graceSeconds,
-        updatedAt = updatedAt,
+        mode = RuleMode.valueOf(mode),
         identity = if (userId != null && uid != null && installedAt != null && signer != null)
             AppKey(userId, packageName, uid, installedAt, signer) else null,
     )

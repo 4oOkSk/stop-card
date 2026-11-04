@@ -26,10 +26,8 @@ class ModuleStore(private val fault: (String) -> Unit) {
         val stat = Os.lstat(path)
         require(OsConstants.S_ISREG(stat.st_mode) && stat.st_uid == 0 && stat.st_gid == 1000 && stat.st_mode and 23 == 0) { "Unsafe control file metadata" }
         require(stat.st_size in 1..maxBytes.toLong()) { "Control file size" }
-        return file.inputStream().use { input ->
-            val bytes = input.readBytesLimited(maxBytes)
-            bytes.toString(Charsets.UTF_8)
-        }
+        // Root writes complete documents by atomic rename; the checked file is immutable.
+        return file.readText()
     }
 
     fun paused(): Boolean = File(ModuleProtocol.PAUSE).exists() || File(ModuleProtocol.EMERGENCY_DISABLED).exists()
@@ -133,14 +131,4 @@ class ModuleStore(private val fault: (String) -> Unit) {
         }
     }
 
-    private fun java.io.InputStream.readBytesLimited(max: Int): ByteArray {
-        val output = java.io.ByteArrayOutputStream()
-        val buffer = ByteArray(4096)
-        while (true) {
-            val count = read(buffer)
-            if (count < 0) return output.toByteArray()
-            require(output.size() + count <= max) { "Control file exceeds limit" }
-            output.write(buffer, 0, count)
-        }
-    }
 }

@@ -13,14 +13,6 @@ import kotlinx.coroutines.flow.flow
 import java.util.Calendar
 import java.util.Date
 
-@Composable
-fun durationLabel(seconds: Int): String = when {
-    seconds <= 0 -> stringResource(R.string.grace_immediately)
-    seconds < 60 -> stringResource(R.string.duration_seconds, seconds)
-    seconds < 3_600 -> stringResource(R.string.duration_minutes, seconds / 60)
-    else -> stringResource(R.string.duration_hours, seconds / 3_600)
-}
-
 /** "0:42" style countdown. */
 fun countdownLabel(millis: Long): String {
     val total = ((millis + 999) / 1_000).coerceAtLeast(0)
@@ -39,14 +31,10 @@ fun reasonLabel(reason: StopReason): String = when (reason) {
     StopReason.FLOW_FINISHED -> "操作完成后停止"
     StopReason.UNLICENSED_RUNNING -> "无许可后台运行"
     StopReason.OBSERVE -> "观察：本来会停止"
-    StopReason.BOOT -> "开机重建状态"
     StopReason.ERROR -> "状态或执行错误"
     StopReason.REVIEW -> "等待复核"
     StopReason.BLOCKED -> "已拦截或未执行"
     StopReason.CANCELED -> "复核取消"
-    StopReason.WOKE -> "后台自启"
-    StopReason.LEFT -> "离开后台后停止"
-    StopReason.RUNNING -> "后台运行时停止"
 }
 
 @Composable

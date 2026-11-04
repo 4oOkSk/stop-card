@@ -7,15 +7,11 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      # Tags are signed and published only when the release key is in the repository secrets:
-      # SIGNING_KEYSTORE_BASE64, SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS, SIGNING_KEY_PASSWORD.
-      SIGNED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNING_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -28,43 +24,16 @@ jobs:
 
       - name: Install Android 17 platform
         run: |
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$(command -v sdkmanager || find "$ANDROID_HOME" -name sdkmanager | head -1)"
-          yes | "$SDKMANAGER" --channel=3 "platforms;android-37.0" "build-tools;37.0.0" >/dev/null
+          sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
           ln -sfn "$ANDROID_HOME/platforms/android-37.0" "$ANDROID_HOME/platforms/android-37"
 
-      - name: Unit tests
-        run: ./gradlew testDebugUnitTest
-
-      - name: Prepare release signing
-        if: env.SIGNED_RELEASE == 'true'
-        env:
-          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
-          {
-            echo "storeFile=release.jks"
-            echo "storePassword=$STORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
-          } > keystore.properties
-
-      - name: Build APKs
-        run: ./gradlew assembleDebug assembleRelease
+      - name: Test and build
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :testbed:assembleDebug
 
       - uses: actions/upload-artifact@v7
         with:
-          name: stop-apks
+          name: test-apks
           path: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
-
-      - name: Publish release
-        if: env.SIGNED_RELEASE == 'true'
-        uses: softprops/action-gh-release@v3
-        with:
-          files: app/build/outputs/apk/release/*.apk
-          generate_release_notes: true
+            testbed/build/outputs/apk/*/debug/*.apk

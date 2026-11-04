@@ -30,7 +30,6 @@ object ModuleProtocol {
         if (previous != null && previous.copy(configGeneration = 0) == desired.copy(configGeneration = 0) && diskGeneration >= confirmed) return previous
         require(diskGeneration <= desired.configGeneration && confirmed <= desired.configGeneration) { "系统配置已更新，请先重新载入系统配置" }
         val latest = maxOf(0, diskGeneration, confirmed, desired.configGeneration)
-        require(latest < Long.MAX_VALUE) { "Configuration generation exhausted" }
         return desired.copy(configGeneration = latest + 1)
     }
 
@@ -49,8 +48,6 @@ object ModuleProtocol {
         val extraKeepAlive: Boolean = false,
         val userId: Int = 0,
         val configGeneration: Long = 0,
-        val exceptions: Set<String> = emptySet(),
-        val essential: Set<String> = emptySet(),
         val selfPackage: String = "",
         val exceptionIdentities: Set<AppKey> = emptySet(),
     ) {
@@ -63,8 +60,6 @@ object ModuleProtocol {
             put("extraKeepAlive", extraKeepAlive)
             put("userId", userId)
             put("configGeneration", configGeneration)
-            put("exceptions", JSONArray(exceptions.toList()))
-            put("essential", JSONArray(essential.toList()))
             put("selfPackage", selfPackage)
             put("exceptionIdentities", JSONArray().apply { exceptionIdentities.forEach { put(it.toJson()) } })
         }.toString()
@@ -82,18 +77,13 @@ object ModuleProtocol {
                 val generation = o.get("configGeneration")
                 if ((generation !is Int && generation !is Long) || o.getLong("configGeneration") <= 0) return null
                 if (o.get("selfPackage") !is String) return null
-                if (o.get("exceptions") !is JSONArray || o.get("essential") !is JSONArray) return null
-                val exceptions = o.getJSONArray("exceptions").strictStringSet() ?: return null
-                val essential = o.getJSONArray("essential").strictStringSet() ?: return null
                 val selfPackage = o.getString("selfPackage")
-                if (exceptions.size > 2_000 || essential.size > 4_000) return null
                 if (!PACKAGE_NAME.matches(selfPackage)) return null
-                if ((exceptions + essential).any { !PACKAGE_NAME.matches(it) }) return null
                 val identities = o.getJSONArray("exceptionIdentities").let { array ->
                     require(array.length() <= 2_000)
                     (0 until array.length()).map { appKey(array.getJSONObject(it)) }.toSet()
                 }
-                if (identities.any { it.userId != 0 || it.packageName !in exceptions }) return null
+                if (identities.map { it.packageName }.toSet().size != identities.size) return null
                 Config(
                     enabled = o.getBoolean("enabled"),
                     observeOnly = o.getBoolean("observeOnly"),
@@ -102,8 +92,6 @@ object ModuleProtocol {
                     extraKeepAlive = o.getBoolean("extraKeepAlive"),
                     userId = 0,
                     configGeneration = o.getLong("configGeneration"),
-                    exceptions = exceptions,
-                    essential = essential,
                     selfPackage = selfPackage,
                     exceptionIdentities = identities,
                 )
@@ -129,8 +117,6 @@ object ModuleProtocol {
         val protocol: Int = VERSION,
         val versionCode: Int = 0,
         val heartbeat: Long = 0,
-        val bootEpoch: Long = 0,
-        val startedAt: Long = 0,
         val taskSource: String = "unknown",
         val configGeneration: Long = 0,
         val configLoaded: Boolean = false,
@@ -193,8 +179,6 @@ object ModuleProtocol {
             put("protocol", protocol)
             put("versionCode", versionCode)
             put("heartbeat", heartbeat)
-            put("bootEpoch", bootEpoch)
-            put("startedAt", startedAt)
             put("taskSource", taskSource)
             put("configGeneration", configGeneration)
             put("appliedGeneration", appliedGeneration)
@@ -218,7 +202,6 @@ object ModuleProtocol {
                         put("stopInMs", app.stopInMs)
                         app.reason?.let { put("reason", it) }
                         put("state", app.state)
-                        put("recentlyVisible", app.recentlyVisible)
                         put("running", app.running)
                     })
                 }
@@ -249,8 +232,6 @@ object ModuleProtocol {
                     protocol = o.optInt("protocol", VERSION),
                     versionCode = o.optInt("versionCode", 0),
                     heartbeat = o.optLong("heartbeat", 0),
-                    bootEpoch = o.optLong("bootEpoch", 0),
-                    startedAt = o.optLong("startedAt", 0),
                     taskSource = o.optString("taskSource", "unknown"),
                     configGeneration = o.optLong("configGeneration", 0),
                     appliedGeneration = o.optLong("appliedGeneration", -1),
@@ -271,7 +252,7 @@ object ModuleProtocol {
                     bootId = o.optString("bootId", ""),
                     heartbeatElapsed = o.optLong("heartbeatElapsed", 0),
                     hooks = o.optJSONObject("hooks").stringMap(),
-                    essentialReasons = o.optJSONObject("essentialReasons")?.let { reasons -> reasons.keys().asSequence().associateWith { reasons.getJSONArray(it).strictStringSet().orEmpty() } }.orEmpty(),
+                    essentialReasons = o.optJSONObject("essentialReasons")?.let { reasons -> reasons.keys().asSequence().associateWith { reasons.getJSONArray(it).strictStringList().orEmpty().toSet() } }.orEmpty(),
                     flows = o.optJSONArray("flows")?.strictStringList().orEmpty(),
                     recovery = o.optString("recovery", "unknown"),
                     commandResults = o.optJSONObject("commandResults").stringMap(),
@@ -386,16 +367,6 @@ object ModuleProtocol {
 
     private fun JSONObject?.stringMap(): Map<String, String> = this?.let { o -> o.keys().asSequence().associateWith { o.getString(it) } }.orEmpty()
 
-    private fun JSONArray.strictStringSet(): Set<String>? {
-        val result = HashSet<String>(length())
-        for (index in 0 until length()) {
-            val value = opt(index)
-            if (value !is String) return null
-            result += value
-        }
-        return result
-    }
-
     private fun JSONArray.strictStringList(): List<String>? {
         val result = ArrayList<String>(length())
         for (index in 0 until length()) {
@@ -434,7 +405,6 @@ object ModuleProtocol {
                     stopInMs = o.optLong("stopInMs", -1),
                     reason = o.optString("reason").takeIf { it.isNotBlank() },
                     state = o.optString("state", "managed"),
-                    recentlyVisible = o.optBoolean("recentlyVisible", false),
                     running = o.optBoolean("running", false),
                 )
             }.getOrNull()

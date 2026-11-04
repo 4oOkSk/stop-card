@@ -10,7 +10,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -33,13 +32,11 @@ import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -53,7 +50,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.R
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
-import io.github.user4ooksk.stopcard.model.RuleMode
 import io.github.user4ooksk.stopcard.ui.MainViewModel
 import io.github.user4ooksk.stopcard.ui.components.AppIcon
 import io.github.user4ooksk.stopcard.ui.components.GroupCard
@@ -70,7 +66,7 @@ import kotlinx.coroutines.delay
 fun HomeScreen(
     main: MainViewModel,
     contentPadding: PaddingValues,
-    onOpenActivity: () -> Unit = {},
+    onOpenActivity: () -> Unit,
 ) {
     val viewModel = graphViewModel { HomeViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()

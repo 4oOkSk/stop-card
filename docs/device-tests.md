@@ -21,7 +21,7 @@ adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager
 | 编号 | 操作 | 需记录的结果 |
 |---|---|---|
 | C1 | 打开 A 后按 Home，留卡 30 分钟并息屏 | 模块未强停；若系统回收，另记回收原因 |
-| C2、C3 | A 点两次 New document card，先删一张，再删最后一张 | 剩余有效卡数；停止延迟、stopped 标记和 PID；没有停用或删除共享任务 |
+| C2、C3 | 打开 A，连续创建两张 New document card；退后台后依次删除原始卡及两张文档卡 | 有效卡数按 3 → 2 → 1 → 0 变化；仍有文档卡时维持卡片许可而非 uncertain，延迟通知及后台入口不降为观察放行；仅最后一张移除后复核强停，记录延迟、stopped 和 PID |
 | C4、R3 | 划卡后立即从桌面重开，重复 100 次；另在复核中暂停 | 旧决策被取消；新会话仍能操作；暂停后无新拒绝 |
 | C5、C6 | 分屏、画中画、锁屏；分别返回、Finish、Finish and remove task | 可见窗口不误杀；实际卡片与排除任务语义正确 |
 | N1 | B 在前台注册延迟通知，退后台；对比留卡和无许可状态 | 通知是否在入队前拒绝；尊重原渠道与通知总开关 |

@@ -54,9 +54,6 @@ interface RuleDao {
     @Query("SELECT * FROM rules")
     suspend fun all(): List<RuleEntity>
 
-    @Query("SELECT * FROM rules WHERE packageName = :packageName")
-    suspend fun get(packageName: String): RuleEntity?
-
     @Upsert
     suspend fun upsert(rules: List<RuleEntity>)
 
@@ -86,7 +83,7 @@ interface EventDao {
 
     @Query(
         "SELECT packageName, COUNT(*) AS count, MAX(time) AS lastTime FROM events " +
-            "WHERE time >= :since AND reason IN ('card_removed','last_visible','manual','flow_finished','unlicensed_running','woke','left','running') " +
+            "WHERE time >= :since AND reason IN ('card_removed','last_visible','manual','flow_finished','unlicensed_running') " +
             "GROUP BY packageName"
     )
     fun observeCounts(since: Long): Flow<List<PackageCount>>

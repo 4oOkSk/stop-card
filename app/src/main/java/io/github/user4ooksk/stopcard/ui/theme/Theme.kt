@@ -1,6 +1,5 @@
 package io.github.user4ooksk.stopcard.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -12,7 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import io.github.user4ooksk.stopcard.model.ThemeMode
 
-/** Warm red palette derived from the brand color, used when dynamic color is off or unavailable. */
+/** Warm red palette derived from the brand color, used when dynamic color is off. */
 private val LightColors = lightColorScheme(
     primary = Color(0xFFB42A26),
     onPrimary = Color(0xFFFFFFFF),
@@ -102,7 +101,7 @@ fun StopTheme(
 ) {
     val context = LocalContext.current
     val colors = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+        dynamicColor ->
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         darkTheme -> DarkColors
         else -> LightColors

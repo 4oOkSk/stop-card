@@ -28,12 +28,6 @@ class AppIcons(context: Context) {
         }
     }
 
-    fun loadBlocking(packageName: String, sizePx: Int): Bitmap? = cached(packageName, sizePx) ?: try {
-        pm.getApplicationIcon(packageName).toBitmap(sizePx, sizePx).also { cache.put(key(packageName, sizePx), it) }
-    } catch (_: PackageManager.NameNotFoundException) {
-        null
-    }
-
     private fun key(packageName: String, sizePx: Int) = "$packageName@$sizePx"
 
     private companion object {

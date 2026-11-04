@@ -18,7 +18,7 @@ import java.util.function.Consumer
 
 data class HookCapability(val status: String, val methods: List<String> = emptyList(), val detail: String = "")
 data class ActivityFact(val token: String, val packageName: String, val uid: Int, val task: TaskKey?, val visible: Boolean)
-data class TaskCloseFact(val task: TaskKey, val owner: String, val uid: Int, val pid: Int, val reason: String)
+data class TaskCloseFact(val task: TaskKey, val owner: String, val uid: Int, val pid: Int)
 data class LaunchFact(
     val source: ActivityFact?,
     val target: ActivityFact,
@@ -65,7 +65,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val systemUiProcesses = ConcurrentHashMap<Int, Int>()
     private data class BroadcastOrigin(val caller: ActivityFact, val evidence: OpenSource?, val observed: Boolean)
     private val broadcastOrigins = java.util.WeakHashMap<Any, BroadcastOrigin>()
-    private data class ServiceCall(val kind: EntryKind, val source: String?, val connection: Any?, val uid: Int, var record: Any? = null)
+    private data class ServiceCall(val kind: EntryKind, val source: String?, val uid: Int, var record: Any? = null)
 
     @Volatile private var atm: Any? = null
     @Volatile private var wm: Any? = null
@@ -125,7 +125,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 if (name == "removeTask") it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("int")
                 else it.returnType == Void.TYPE && it.parameterCount == 0
             }, before = { p ->
-                p.setObjectExtra("stopcard.closeCaller", closeCaller.get())
                 closeCaller.set(Caller(Binder.getCallingUid(), Binder.getCallingPid()))
             })
         }
@@ -148,16 +147,13 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             // Only the framework's recents removal route denotes an explicit close. Trimming,
             // display changes and finish() remain task reconciliation events.
             val caller = closeCaller.get() ?: if (p.args.size == 7) Caller(p.args[4] as Int, p.args[5] as Int) else Caller(-1, -1)
-            val userClosed = p.args[2] == true && (caller.uid in launcherUids || trustedSystemUi(caller.uid, caller.pid)) &&
-                reason in setOf("remove-task", "removeTask", "remove-all-visible-recent-tasks")
             if (p.args[2] == true && reason in setOf("remove-task", "removeTask", "remove-all-visible-recent-tasks")) {
-                sink.taskClosed(TaskCloseFact(t.key, t.owner, caller.uid, caller.pid, reason))
-            } else sink.removed(t.key, t.owner, userClosed)
+                sink.taskClosed(TaskCloseFact(t.key, t.owner, caller.uid, caller.pid))
+            } else sink.removed(t.key, t.owner, false)
         })
         hook("recents_open", "com.android.server.wm.ActivityTaskSupervisor", "startActivityFromRecents", {
             it.returnType == Int::class.javaPrimitiveType && names(it).take(3) == listOf("int", "int", "int")
         }, before = { p ->
-            p.setObjectExtra("stopcard.previous", launchSource.get())
             if (p.args[1] as Int !in launcherUids && !trustedSystemUi(p.args[1] as Int, p.args[0] as Int)) return@hook
             launchSource.set(OpenSource.RECENTS)
             val t = knownTasks[p.args[2] as Int]
@@ -169,7 +165,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             }
         }, after = { p ->
             (p.getObjectExtra("stopcard.launch") as? LaunchFact)?.let { sink.launched(it, !p.hasThrowable() && (p.result as? Int ?: -1) >= 0) }
-            launchSource.set(p.getObjectExtra("stopcard.previous") as? OpenSource)
         })
     }
 
@@ -252,10 +247,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 if (kind == EntryKind.SERVICE) n.take(7) == listOf("android.app.IApplicationThread", "android.content.Intent", "java.lang.String", "int", "int", "boolean", "java.lang.String") && it.returnType == ComponentName::class.java
                 else n.take(5) == listOf("android.app.IApplicationThread", "android.os.IBinder", "android.content.Intent", "java.lang.String", "android.app.IServiceConnection") && n.takeLast(2) == listOf("java.lang.String", "int") && it.returnType == Int::class.javaPrimitiveType
             }, before = { p ->
-                p.setObjectExtra("stopcard.previous", serviceCalls.get())
                 val source = if (kind == EntryKind.SERVICE) p.args[6] as? String else p.args[p.args.size - 2] as? String
-                serviceCalls.set(ServiceCall(kind, source, if (kind == EntryKind.BIND) p.args[4] else null,
-                    if (kind == EntryKind.SERVICE) p.args[4] as Int else Binder.getCallingUid()))
+                serviceCalls.set(ServiceCall(kind, source, if (kind == EntryKind.SERVICE) p.args[4] as Int else Binder.getCallingUid()))
             }, after = { p ->
                 val context = serviceCalls.get()
                 val record = context?.record
@@ -267,7 +260,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     val name = field(record, "name") as ComponentName
                     sink.component("failed_bind:${token(record)}", context.source, CallTarget(name.packageName, name.flattenToString(), kind), false)
                 }
-                serviceCalls.set(p.getObjectExtra("stopcard.previous") as? ServiceCall)
             })
         }
         hook("service_lookup", "com.android.server.am.ActiveServices", "retrieveServiceLocked", {
@@ -286,7 +278,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 p.result = null
             } else {
                 context.record = r
-                p.setObjectExtra("stopcard.binding", target)
                 // The connection is tracked only after Android actually adds it, below.
             }
         })
@@ -295,7 +286,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             XposedBridge.hookAllConstructors(type, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) = guarded("binding_lifetime") {
                     val context = serviceCalls.get() ?: return@guarded
-                    val connection = field(param.thisObject, "conn") ?: return@guarded
                     val binding = field(param.thisObject, "binding") ?: return@guarded
                     val service = field(binding, "service") ?: return@guarded
                     val name = field(service, "name") as ComponentName
@@ -467,9 +457,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("pending_intent", "com.android.server.am.PendingIntentRecord", "sendInner", {
             it.returnType == Int::class.javaPrimitiveType && names(it).take(4) == listOf("android.app.IApplicationThread", "int", "android.content.Intent", "java.lang.String")
         }, before = { p ->
-            p.setObjectExtra("stopcard.previous", launchSource.get())
-            p.setObjectExtra("stopcard.pendingObserved", pendingObserved.get())
-            p.setObjectExtra("stopcard.pendingCaller", pendingCaller.get())
             val key = field(p.thisObject, "key") ?: return@hook
             val creator = field(key, "packageName") as String
             val uid = field(p.thisObject, "uid") as Int
@@ -481,10 +468,6 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             }
             // Gate the final resolved Activity/service/receiver after native user and fill-in
             // resolution. A creator package or mutable original Intent is not the target identity.
-        }, after = { p ->
-            launchSource.set(p.getObjectExtra("stopcard.previous") as? OpenSource)
-            pendingObserved.set(p.getObjectExtra("stopcard.pendingObserved") as? Boolean)
-            pendingCaller.set(p.getObjectExtra("stopcard.pendingCaller") as? ActivityFact)
         })
     }
 

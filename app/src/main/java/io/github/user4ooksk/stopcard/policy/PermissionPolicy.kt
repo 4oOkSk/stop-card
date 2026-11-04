@@ -3,7 +3,7 @@ package io.github.user4ooksk.stopcard.policy
 import java.util.concurrent.atomic.AtomicLong
 
 /** Facts have framework provenance. Intent extras never create an [OpenSource]. */
-enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION, SYSTEM_CHOOSER, INTERACTION }
+enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION }
 enum class EntryKind { ACTIVITY, SERVICE, BIND, BROADCAST, PROVIDER, JOB, ALARM, PENDING_INTENT, PROCESS, NOTIFICATION }
 
 data class AppKey(
@@ -71,7 +71,6 @@ class PermissionPolicy {
         var cards = emptySet<TaskKey>()
         var candidates = emptySet<TaskKey>()
         var visible = false
-        var wasVisible = false
         var closing = false
         var reason = ""
         var due: Long? = null
@@ -93,8 +92,7 @@ class PermissionPolicy {
         val grants = HashSet<Grant>()
         val bindings = HashMap<String, Grant>()
         val activities = HashSet<String>()
-        var delivered = false
-        var canceled = false
+        var finished = false
         var trackingUnknown = false
     }
 
@@ -119,7 +117,6 @@ class PermissionPolicy {
     private var boot: String? = null
     private var lastNow = 0L
     private var taskOwners = emptyMap<TaskKey, String>()
-    private var lastWorld: WorldSnapshot? = null
     private val visibleWindows = HashMap<String, String>()
 
     @Volatile private var published = Published()
@@ -213,10 +210,11 @@ class PermissionPolicy {
         if (anyVisible) {
             invalidate(pkg)
             t.visible = true
-            t.wasVisible = true
             t.stopped = false
             t.due = null
-            if (task != null && t.openedUntil >= now) t.activated += task
+            // A document displayed during an active session continues that session. Hidden
+            // sibling tasks do not inherit it; reconciliation still verifies task ownership.
+            if (task != null && (t.activated.isNotEmpty() || t.openedUntil > now)) t.activated += task
         } else if (t.visible) {
             invalidate(pkg)
             t.visible = false
@@ -248,7 +246,8 @@ class PermissionPolicy {
             unknown(now)
             return
         }
-        if (boot != null && boot != world.boot) {
+        val first = boot != world.boot
+        if (boot != null && first) {
             flows.clear()
             for ((pkg, t) in tracks) {
                 invalidate(pkg)
@@ -265,7 +264,6 @@ class PermissionPolicy {
         }
         boot = world.boot
         world.windows?.let { visibleWindows.clear(); visibleWindows.putAll(it) }
-        val first = lastWorld == null || lastWorld?.boot != world.boot
         val byOwner = world.tasks.filter { it.key.userId == 0 && it.key.boot == world.boot }.groupBy { it.owner }
         for (pkg in byOwner.keys + world.visiblePackages + world.tasks.filter { it.key.userId == 0 }.flatMap { it.visiblePackages }) track(pkg)
         for ((pkg, t) in tracks) {
@@ -289,10 +287,9 @@ class PermissionPolicy {
                 }
             }
             t.visible = onScreen
-            if (onScreen) t.wasVisible = true
-            if (t.openedUntil >= now) {
-                // An explicit open may precede task creation. Only tasks actually seen visible
-                // in that open's confirmation window inherit its activation.
+            if (t.activated.isNotEmpty() || t.openedUntil > now) {
+                // Continue a verified session only through tasks actually displayed by its owner.
+                // This also covers a visible document when the window callback is unavailable.
                 t.activated += owned.filter { pkg in it.visiblePackages }.map { it.key }
             }
             // PiP and other temporary recents eligibility changes do not end task identity.
@@ -317,46 +314,28 @@ class PermissionPolicy {
             }
         }
         taskOwners = world.tasks.associate { it.key to it.owner }
-        lastWorld = world
         ready = true
         reviewFlows(now)
         publish(now)
     }
 
-    /**
-     * A flow can start only from a confirmed input/launcher/chooser/notification event. A visible
-     * source alone is insufficient. Component grants are exact; they do not authorize arbitrary
-     * services or other applications.
-     */
+    /** Exact component grants. Unconfirmed visible calls remain observed within their own flow. */
     @Synchronized fun beginFlow(
         source: String,
         sourceActivity: String?,
         target: CallTarget,
-        evidence: OpenSource,
         now: Long,
+        observed: Boolean = false,
     ): Long? {
         if (track(source) == null || track(target.packageName) == null || flows.size >= MAX_FLOWS) return null
         val id = serial.incrementAndGet()
-        val f = Flow(id, source, sourceActivity, now + rule.hiddenReviewMs)
-        f.grants += Grant(apps.getValue(source), target, false)
+        val f = Flow(id, source, sourceActivity, now + rule.hiddenReviewMs, observed)
+        f.grants += Grant(apps.getValue(source), target, observed)
         flows[id] = f
         invalidate(target.packageName)
         invalidate(source)
         publish(now)
         return id
-    }
-
-    /** A visible caller without input provenance is observed, never a source of card activation. */
-    @Synchronized fun observeFlow(source: String, sourceActivity: String?, target: CallTarget, now: Long): Long? {
-        if (track(source) == null || track(target.packageName) == null || flows.size >= MAX_FLOWS) return null
-        val f = Flow(serial.incrementAndGet(), source, sourceActivity, now + rule.hiddenReviewMs, true)
-        f.grants += Grant(apps.getValue(source), target, true)
-        flows[f.id] = f
-        invalidate(source)
-        invalidate(target.packageName)
-        tracks[target.packageName]?.due = null
-        publish(now)
-        return f.id
     }
 
     /** Extension needs both an existing flow and fresh input for a new target. */
@@ -419,10 +398,9 @@ class PermissionPolicy {
         publish(now)
     }
 
-    @Synchronized fun finishFlow(id: Long, canceled: Boolean, now: Long) {
+    @Synchronized fun finishFlow(id: Long, now: Long) {
         val f = flows[id] ?: return
-        f.canceled = canceled
-        f.delivered = true
+        f.finished = true
         f.reviewAt = now + rule.hiddenReviewMs
         reviewFlows(now)
         publish(now)
@@ -430,7 +408,7 @@ class PermissionPolicy {
 
     @Synchronized fun sourceActivityRemoved(token: String, now: Long) {
         for (flow in flows.values) if (flow.activity == token) {
-            flow.canceled = true
+            flow.finished = true
             flow.reviewAt = now + rule.hiddenReviewMs
         }
         reviewFlows(now)
@@ -442,7 +420,7 @@ class PermissionPolicy {
         val finished = flows.values.filter { f ->
             val visible = f.grants.any { tracks[it.target.packageName]?.visible == true }
             if (visible) f.reviewAt = now + rule.hiddenReviewMs
-            !visible && (now >= f.reviewAt || (!f.trackingUnknown && (f.delivered || f.canceled) &&
+            !visible && (now >= f.reviewAt || (!f.trackingUnknown && f.finished &&
                 f.bindings.isEmpty() && f.activities.isEmpty()))
         }
         for (f in finished) {

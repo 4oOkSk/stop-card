@@ -39,10 +39,6 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun refresh() {
-        viewModelScope.launch { graph.module.refresh(forceRoot = true) }
-    }
-
     fun reloadConfiguration() {
         viewModelScope.launch {
             maintenance.value = runCatching { graph.sync.reload(); "已重新载入系统配置" }
@@ -56,11 +52,10 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun clearHistory(onDone: () -> Unit) {
+    fun clearHistory() {
         viewModelScope.launch {
             graph.events.clear()
             maintenance.value = if (graph.module.clearModuleLog()) "已提交模块日志清除请求，处理结果见命令回执" else "模块日志清除请求未提交"
-            onDone()
         }
     }
 
@@ -86,10 +81,9 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun resetExceptions(onDone: () -> Unit) {
+    fun resetExceptions() {
         viewModelScope.launch {
             graph.rules.delete(graph.rules.all().keys)
-            onDone()
         }
     }
 }

@@ -18,7 +18,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -37,7 +36,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.BuildConfig
-import io.github.user4ooksk.stopcard.R
 import io.github.user4ooksk.stopcard.bridge.ModuleClient
 import io.github.user4ooksk.stopcard.model.ThemeMode
 import io.github.user4ooksk.stopcard.ui.components.GroupCard
@@ -221,7 +219,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                     supportingContent = { Text("删除本地决策日志。不会改变应用例外。") },
                     modifier = Modifier.fillMaxWidth(),
                     trailingContent = {
-                        TextButton(onClick = { viewModel.clearHistory {} }) { Text("清除") }
+                        TextButton(onClick = viewModel::clearHistory) { Text("清除") }
                     },
                 )
                 GroupDivider()
@@ -330,7 +328,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmReset = false
-                    viewModel.resetExceptions {}
+                    viewModel.resetExceptions()
                 }) { Text("清除") }
             },
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("取消") } },

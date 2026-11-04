@@ -15,29 +15,17 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 data class AppRule(
     val packageName: String,
     val mode: RuleMode,
-    val decided: Boolean,
-    /** Kept for database compatibility; the card rule has no grace period. */
-    val graceSeconds: Int?,
-    val updatedAt: Long,
     val identity: AppKey? = null,
 ) {
-    val blocked: Boolean get() = mode == RuleMode.BLOCK
     val exempt: Boolean get() = mode == RuleMode.ALLOW && identity != null
 }
 
 data class InstalledApp(
     val packageName: String,
     val label: String,
-    val uid: Int,
     val isSystem: Boolean,
-    val isLaunchable: Boolean,
-    val category: Int,
-    val firstInstallTime: Long,
     val identity: AppKey? = null,
-) {
-    /** Apps with a launcher entry are the default management surface. */
-    val isUserFacing: Boolean get() = !isSystem && isLaunchable
-}
+)
 
 data class AppSettings(
     val onboarded: Boolean = false,
@@ -72,9 +60,6 @@ enum class StopReason(val code: String) {
     /** Observe mode: the module would have stopped it. */
     OBSERVE("observe"),
 
-    /** State was rebuilt after boot; no app was stopped. */
-    BOOT("boot"),
-
     /** A task or policy read failed. */
     ERROR("error"),
 
@@ -85,12 +70,7 @@ enum class StopReason(val code: String) {
     BLOCKED("blocked"),
 
     /** A pending stop was cancelled by a new card, pause or exception. */
-    CANCELED("canceled"),
-
-    // Codes written by the upstream Stop app; kept so old rows still render.
-    WOKE("woke"),
-    LEFT("left"),
-    RUNNING("running");
+    CANCELED("canceled");
 
     companion object {
         fun of(code: String): StopReason = entries.firstOrNull { it.code == code } ?: ERROR
@@ -99,18 +79,17 @@ enum class StopReason(val code: String) {
 
 /** Events that represent an actual force-stop, not a review or a cancelled decision. */
 val StopReason.isStop: Boolean
-    get() = this in setOf(
+    get() = when (this) {
         StopReason.CARD_REMOVED, StopReason.LAST_VISIBLE, StopReason.MANUAL,
-        StopReason.FLOW_FINISHED, StopReason.UNLICENSED_RUNNING,
-        StopReason.WOKE, StopReason.LEFT, StopReason.RUNNING,
-    )
+        StopReason.FLOW_FINISHED, StopReason.UNLICENSED_RUNNING -> true
+        else -> false
+    }
 
 data class StopEvent(
     val id: Long,
     val time: Long,
     val packageName: String,
     val reason: StopReason,
-    val sinceLeftMs: Long = 0,
     val detail: String = "",
 )
 
@@ -124,10 +103,5 @@ data class RunningApp(
     val stopInMs: Long = -1,
     val reason: String? = null,
     val state: String = "managed",
-    val recentlyVisible: Boolean = false,
     val running: Boolean = false,
-) {
-    // Names used by the reused home screen.
-    val inUse: Boolean get() = visible
-    val procState: Int get() = -1
-}
+)

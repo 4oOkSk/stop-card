@@ -13,7 +13,6 @@ import io.github.user4ooksk.stopcard.data.RulesRepository
 import io.github.user4ooksk.stopcard.data.SettingsRepository
 import io.github.user4ooksk.stopcard.data.db.StopDatabase
 import io.github.user4ooksk.stopcard.module.SystemFacts
-import io.github.user4ooksk.stopcard.model.RuleMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -87,10 +86,6 @@ class AppGraph(val context: Context) {
         if (incoming.isNotEmpty()) events.add(incoming)
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastPrune > 60_000) { events.prune(); lastPrune = now }
-    }
-
-    suspend fun decide(packageNames: Collection<String>, mode: RuleMode) {
-        rules.decide(packageNames, mode)
     }
 
     /** Pauses or resumes both the module flag and the app-side switch. */

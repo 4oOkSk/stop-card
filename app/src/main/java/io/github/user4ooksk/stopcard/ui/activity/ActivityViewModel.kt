@@ -6,6 +6,7 @@ import io.github.user4ooksk.stopcard.AppGraph
 import io.github.user4ooksk.stopcard.data.EventsRepository
 import io.github.user4ooksk.stopcard.model.StopEvent
 import io.github.user4ooksk.stopcard.model.StopReason
+import io.github.user4ooksk.stopcard.model.isStop
 import io.github.user4ooksk.stopcard.ui.daysBefore
 import io.github.user4ooksk.stopcard.ui.startOfDay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,7 +49,7 @@ class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
         val weekStart = daysBefore(now, 6)
         val week = (6 downTo 0).map { daysAgo ->
             val start = daysBefore(now, daysAgo)
-            ChartDay(start, events.count { startOfDay(it.time) == start && it.isStop })
+            ChartDay(start, events.count { startOfDay(it.time) == start && it.reason.isStop })
         }
         val shown = events.filter { it.matches(filter) }
         State(
@@ -57,7 +58,7 @@ class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
                 .map { (start, dayEvents) -> Day(start, fold(dayEvents) { apps[it]?.label ?: it }) }
                 .sortedByDescending { it.start },
             week = week,
-            weekTotal = events.count { it.time >= weekStart && it.isStop },
+            weekTotal = events.count { it.time >= weekStart && it.reason.isStop },
             isEmpty = events.isEmpty(),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), State())
@@ -68,13 +69,6 @@ class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
             graph.module.clearModuleLog()
         }
     }
-
-    private val StopEvent.isStop: Boolean
-        get() = reason in setOf(
-            StopReason.CARD_REMOVED, StopReason.LAST_VISIBLE, StopReason.MANUAL,
-            StopReason.WOKE, StopReason.LEFT, StopReason.RUNNING,
-            StopReason.FLOW_FINISHED, StopReason.UNLICENSED_RUNNING,
-        )
 
     private fun StopEvent.matches(filter: Filter) = when (filter) {
         Filter.ALL -> true

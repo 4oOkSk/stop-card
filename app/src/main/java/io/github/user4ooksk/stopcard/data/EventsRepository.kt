@@ -57,7 +57,6 @@ class EventsRepository(context: Context, private val dao: EventDao) {
         time = time,
         packageName = packageName,
         reason = StopReason.of(reason),
-        sinceLeftMs = sinceLeftMs,
         detail = detail,
     )
 

@@ -14,7 +14,7 @@ val keystoreProperties = Properties().apply {
     if (file.exists()) file.inputStream().use(::load)
 }
 
-val appVersionName = "0.2.2"
+val appVersionName = "0.2.3"
 val moduleSigner = if (keystoreProperties.isEmpty()) "" else {
     val store = KeyStore.getInstance(KeyStore.getDefaultType())
     rootProject.file(keystoreProperties.getProperty("storeFile")).inputStream().use {
@@ -35,11 +35,11 @@ android {
 
     defaultConfig {
         applicationId = "io.github.user4ooksk.stopcard"
-        minSdk = 28
+        minSdk = 37
         // Built against the Android 17 platform (API 37.0) from the SDK canary channel.
         // The first device target is Android 17; targetSdk stays 36 until behavior changes are checked.
         targetSdk = 36
-        versionCode = 4
+        versionCode = 5
         versionName = appVersionName
         buildConfigField("String", "MODULE_SIGNER_SHA256", "\"$moduleSigner\"")
     }
@@ -102,21 +102,17 @@ dependencies {
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
-    implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
-    debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.kotlinx.coroutines.android)
     compileOnly(libs.xposed.api)
 
     testImplementation(libs.junit)
-    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.org.json)
 }

@@ -13,7 +13,6 @@ import io.github.user4ooksk.stopcard.model.AppSettings
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -29,8 +28,6 @@ class MainViewModel(private val graph: AppGraph) : ViewModel() {
     val settings: StateFlow<AppSettings?> = graph.settings.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    val moduleState = graph.module.state
-
     val protection: StateFlow<Protection> = combine(
         graph.settings.settings,
         graph.module.state,
@@ -40,10 +37,6 @@ class MainViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun setProtectionEnabled(enabled: Boolean) {
         viewModelScope.launch { graph.setProtectionEnabled(enabled) }
-    }
-
-    fun setObserveOnly(observeOnly: Boolean) {
-        viewModelScope.launch { graph.settings.update { it.copy(observeOnly = observeOnly) } }
     }
 
     fun refresh() {

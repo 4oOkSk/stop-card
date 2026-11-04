@@ -16,28 +16,18 @@ class RootShell {
         val ok: Boolean get() = code == 0
     }
 
-    @Volatile
     private var checked = false
 
-    @Volatile
     private var granted = false
 
+    @Synchronized
     fun available(force: Boolean = false): Boolean {
-        if (!checked || force) check(force)
-        return granted
-    }
-
-    fun check(force: Boolean = false): Boolean {
-        if (checked && !force) return granted
-        synchronized(this) {
-            if (checked && !force) return granted
-            granted = runCatching {
-                val result = exec("id")
-                result.ok && result.output.contains("uid=0")
-            }.getOrDefault(false)
+        if (!checked || force) {
+            val result = exec("id")
+            granted = result.ok && result.output.contains("uid=0")
             checked = true
-            return granted
         }
+        return granted
     }
 
     fun exec(command: String, stdin: String? = null, timeoutMs: Long = 8_000): Result {

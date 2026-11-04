@@ -6,8 +6,6 @@
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
-    <!-- Used only for local status notifications. -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Reads the current VPN owner and network state for the dynamic exception set. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 

@@ -48,9 +48,6 @@ class ModuleClient(
     private val _state = MutableStateFlow<State>(State.Waiting)
     val state: StateFlow<State> = _state.asStateFlow()
 
-    private val _appliedGeneration = MutableStateFlow(-1L)
-    val appliedGeneration: StateFlow<Long> = _appliedGeneration.asStateFlow()
-
     private val commandMutex = Mutex()
     private val configMutex = Mutex()
     private val preferences = context.getSharedPreferences("module_sync", Context.MODE_PRIVATE)
@@ -112,12 +109,9 @@ class ModuleClient(
             val issue = ModuleProtocol.stateIssue(module, boot, SystemClock.elapsedRealtime(), BuildConfig.VERSION_CODE)
             if (issue == "different_boot" || issue == "stale_heartbeat") {
                 _state.value = State.Failed("模块状态已过期，正在等待当前开机的心跳", module)
-                _appliedGeneration.value = -1
             } else if (issue != null) {
                 _state.value = State.Failed("模块版本或系统进程身份不匹配，请重启以加载当前版本", module)
-                _appliedGeneration.value = -1
             } else {
-                _appliedGeneration.value = module.appliedGeneration
                 if (module.appliedGeneration > 0 && _synchronization.value.generation == module.appliedGeneration) {
                     _synchronization.value = Synchronization(generation = module.configGeneration)
                 }
@@ -176,52 +170,29 @@ class ModuleClient(
         ModuleProtocol.Event.listFromJsonLines(text).filter { it.id > afterId }
     }
 
-    suspend fun stopNow(packages: Collection<String>): Boolean = commandMutex.withLock {
-        withContext(Dispatchers.IO) {
-            if (packages.isEmpty()) return@withContext true
-            if (confirmedGeneration() <= 0) return@withContext false
-            val command = ModuleProtocol.Command(
-                id = ++commandId,
-                configGeneration = confirmedGeneration(),
-                expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
-                stop = packages.filter { it.isNotBlank() }.distinct(),
-                identities = packages.mapNotNullTo(HashSet()) { SystemFacts(context).currentIdentity(it) },
-            )
-            root.write(ModuleProtocol.commandPath(command.id), command.toJson())
-        }
-    }
+    suspend fun stopNow(packages: Collection<String>): Boolean =
+        packages.isEmpty() || submitCommand(packages)
 
-    suspend fun stopAllCards(): Boolean = commandMutex.withLock {
-        withContext(Dispatchers.IO) {
-            if (confirmedGeneration() <= 0) return@withContext false
-            val command = ModuleProtocol.Command(
-                id = ++commandId,
-                configGeneration = confirmedGeneration(),
-                expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
-                stopAll = true,
-                identities = (state.value as? State.Connected)?.module?.apps.orEmpty().filter { it.cards > 0 }
-                    .mapNotNullTo(HashSet()) { SystemFacts(context).currentIdentity(it.packageName) },
-            )
-            root.write(ModuleProtocol.commandPath(command.id), command.toJson())
-        }
-    }
-
-    private fun confirmedGeneration(): Long =
-        (state.value as? State.Connected)?.module?.configGeneration ?: 0L
+    suspend fun stopAllCards(): Boolean = submitCommand(stopAll = true)
 
     /** The module serializes log deletion with its own writer and acknowledges completion. */
-    suspend fun clearModuleLog(): Boolean = commandMutex.withLock {
+    suspend fun clearModuleLog(): Boolean = submitCommand(clearLog = true)
+
+    private suspend fun submitCommand(packages: Collection<String> = emptyList(), stopAll: Boolean = false, clearLog: Boolean = false): Boolean = commandMutex.withLock {
         withContext(Dispatchers.IO) {
-            if (confirmedGeneration() <= 0) return@withContext false
+            val module = (state.value as? State.Connected)?.module ?: return@withContext false
+            if (module.appliedGeneration <= 0) return@withContext false
+            val targets = if (stopAll) module.apps.filter { it.cards > 0 }.map { it.packageName } else packages.distinct()
+            val identity = SystemFacts(context)
             val command = ModuleProtocol.Command(
-                id = ++commandId, configGeneration = confirmedGeneration(),
-                expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS, clearLog = true,
+                id = ++commandId, configGeneration = module.appliedGeneration,
+                expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
+                stop = if (stopAll) emptyList() else targets.toList(), stopAll = stopAll, clearLog = clearLog,
+                identities = targets.mapNotNullTo(HashSet(), identity::currentIdentity),
             )
             root.write(ModuleProtocol.commandPath(command.id), command.toJson())
         }
     }
-
-    fun packageName(): String = context.packageName
 
     private companion object {
         const val REFRESH_MS = 3_000L

@@ -72,7 +72,7 @@ fun MainScreen(
             label = "tab",
         ) { current ->
             when (current) {
-                Tab.HOME -> HomeScreen(main = main, contentPadding = padding)
+                Tab.HOME -> HomeScreen(main = main, contentPadding = padding, onOpenActivity = { tab = Tab.ACTIVITY })
                 Tab.APPS -> AppsScreen(contentPadding = padding)
                 Tab.ACTIVITY -> ActivityScreen(contentPadding = padding, darkTheme = darkTheme)
                 Tab.SETTINGS -> SettingsScreen(contentPadding = padding)

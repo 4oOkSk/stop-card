@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.os.Build
 import io.github.user4ooksk.stopcard.model.InstalledApp
 import io.github.user4ooksk.stopcard.module.SystemFacts
 import kotlinx.coroutines.Dispatchers
@@ -37,55 +36,24 @@ class InstalledApps(private val context: Context) {
     }
 
     private fun load(): Map<String, InstalledApp> {
-        val launchable = launchablePackages()
-        val packages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(PackageManager.GET_SIGNING_CERTIFICATES.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getInstalledPackages(PackageManager.GET_SIGNING_CERTIFICATES)
-        }
+        @Suppress("DEPRECATION")
+        val packages = pm.getInstalledPackages(PackageManager.GET_SIGNING_CERTIFICATES)
         val identities = SystemFacts(context)
         return packages.mapNotNull { pkg ->
             val info = pkg.applicationInfo ?: return@mapNotNull null
             pkg.packageName to InstalledApp(
                 packageName = pkg.packageName,
                 label = info.loadLabel(pm).toString().ifBlank { pkg.packageName },
-                uid = info.uid,
                 isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0,
-                isLaunchable = pkg.packageName in launchable,
-                category = info.category,
-                firstInstallTime = pkg.firstInstallTime,
                 identity = identities.identity(pkg),
             )
         }.toMap()
     }
 
-    private fun launchablePackages(): Set<String> {
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-        }
-        return activities.mapTo(HashSet()) { it.activityInfo.packageName }
-    }
-
-    private fun packageInfo(packageName: String) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        pm.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
-    } else {
-        @Suppress("DEPRECATION")
-        pm.getPackageInfo(packageName, 0)
-    }
+    @Suppress("DEPRECATION")
+    private fun packageInfo(packageName: String) = pm.getPackageInfo(packageName, 0)
 
     fun launchIntent(packageName: String): Intent? = pm.getLaunchIntentForPackage(packageName)
-
-    fun isInstalled(packageName: String): Boolean = try {
-        packageInfo(packageName)
-        true
-    } catch (_: PackageManager.NameNotFoundException) {
-        false
-    }
 
     val userId: Int get() = context.applicationInfo.uid / PER_USER_RANGE
 

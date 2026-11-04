@@ -59,7 +59,7 @@ class PermissionPolicyTest {
 
     @Test fun `reinstall cancels old operation identity and reviews only its remaining participants`() {
         val p = policy()
-        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 100)
+        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100)
         p.reconcile(world(), 4_000)
         val replacement = a.copy(installedAt = 99, uid = 10099)
         p.setApps(listOf(replacement, b, c), 4_001)
@@ -122,7 +122,7 @@ class PermissionPolicyTest {
         p.setApps(listOf(a, sibling, c), 2)
         opened(p)
         val ticket = closing(p)
-        p.observeFlow(c.packageName, "source", CallTarget(sibling.packageName, "pay.app/Pay", EntryKind.ACTIVITY), 701)
+        p.beginFlow(c.packageName, "source", CallTarget(sibling.packageName, "pay.app/Pay", EntryKind.ACTIVITY), 701, observed = true)
         assertFalse(p.valid(ticket, setOf(a.packageName, sibling.packageName)))
         assertFalse("a group member with unknown identity is not safe", p.valid(ticket, setOf(a.packageName, "unknown.app")))
     }
@@ -131,7 +131,7 @@ class PermissionPolicyTest {
         val p = policy(); opened(p)
         val group = setOf(a.packageName, b.packageName)
         assertFalse(p.keepAlive(group))
-        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 200)
+        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 200)
         assertTrue(p.keepAlive(group))
         p.pause(true, 201)
         assertFalse(p.keepAlive(group))
@@ -148,7 +148,7 @@ class PermissionPolicyTest {
 
     @Test fun `two tasks opened between snapshots both retain activation`() {
         val p = policy(); opened(p)
-        p.opened(a.packageName, t2, OpenSource.INTERACTION, 150)
+        p.opened(a.packageName, t2, OpenSource.RECENTS, 150)
         p.reconcile(world(task(t1), task(t2)), 151)
         p.removed(t1, a.packageName, true, 200)
         p.reconcile(world(task(t2)), 201)
@@ -164,6 +164,78 @@ class PermissionPolicyTest {
         val ticket = closing(p)
         p.pause(true, 701)
         assertFalse(p.valid(ticket))
+    }
+
+    @Test fun `three document cards retain notification and wake permission until the last is removed`() {
+        val p = policy(); opened(p)
+        val t3 = t2.copy(taskId = 3)
+        // Documents can show and hide between polls, long after the launch confirmation expired.
+        p.visible(a.packageName, t2, true, 5000, "document-1")
+        p.visible(a.packageName, t2, false, 5001, "document-1")
+        p.visible(a.packageName, t3, true, 5002, "document-2")
+        p.visible(a.packageName, t3, false, 5003, "document-2")
+        p.reconcile(world(task(t1), task(t2), task(t3)), 5004)
+        assertEquals(3, p.views().single().cards)
+
+        for ((index, removal) in listOf(t1 to listOf(t2, t3), t2 to listOf(t3)).withIndex()) {
+            val (removed, remaining) = removal
+            val at = 5100L + index * 20
+            p.removed(removed, a.packageName, true, at)
+            p.reconcile(world(*remaining.map { task(it) }.toTypedArray()), at + 1)
+            assertEquals(remaining.size, p.views().single().cards)
+            assertEquals("card", p.views().single().state)
+            assertTrue(p.stops(at + 2).isEmpty())
+            for (kind in listOf(EntryKind.NOTIFICATION, EntryKind.BIND, EntryKind.PROCESS)) {
+                val decision = p.entry(0, CallTarget(a.packageName, kind = kind), at + 3)
+                assertTrue(decision.allow)
+                assertFalse("a verified card must not fall back to observation", decision.wouldBlock)
+            }
+        }
+        p.removed(t3, a.packageName, true, 5200)
+        p.reconcile(world(), 5201)
+        assertEquals(0, p.views().single().cards)
+        assertTrue(p.stops(5202).isEmpty())
+        assertTrue(p.valid(p.stops(5702).single()))
+    }
+
+    @Test fun `visible document reconciliation continues a session without activating a hidden historical sibling`() {
+        val t3 = t2.copy(taskId = 3)
+        val p = PermissionPolicy().apply {
+            setApps(listOf(a), 0); configure(rule, 0); pause(false, 0)
+            reconcile(world(task(t2)), 1)
+        }
+        p.opened(a.packageName, t1, OpenSource.LAUNCHER, 100)
+        p.reconcile(world(task(t1, visible = true), task(t2)), 101)
+        assertEquals(1, p.views().single().cards)
+        // The snapshot provides the visible task when a window callback was missed.
+        p.reconcile(world(task(t1), task(t2), task(t3, visible = true)), 5000)
+        p.reconcile(world(task(t1), task(t2), task(t3)), 5001)
+        assertEquals(2, p.views().single().cards)
+        p.removed(t1, a.packageName, true, 5100)
+        p.reconcile(world(task(t2), task(t3)), 5101)
+        assertEquals(1, p.views().single().cards)
+        assertEquals("card", p.views().single().state)
+    }
+
+    @Test fun `an excluded document stays visible protection rather than an additional card`() {
+        val p = policy(); opened(p)
+        p.visible(a.packageName, t2, true, 5000, "excluded-document")
+        p.reconcile(world(task(t1), task(t2, visible = true, eligible = false)), 5001)
+        assertEquals(1, p.views().single().cards)
+        p.visible(a.packageName, t2, false, 5002, "excluded-document")
+        p.reconcile(world(task(t1), task(t2, eligible = false)), 5003)
+        assertEquals(1, p.views().single().cards)
+    }
+
+    @Test fun `a stopped session cannot activate a new document through visibility alone`() {
+        val p = policy(); opened(p)
+        p.completed(p.manual(a.packageName)!!, true, false, 200)
+        p.visible(a.packageName, t2, true, 5000, "unconfirmed-document")
+        p.reconcile(world(task(t1), task(t2, visible = true)), 5001)
+        assertEquals(0, p.views().single().cards)
+        p.visible(a.packageName, t2, false, 5002, "unconfirmed-document")
+        p.reconcile(world(task(t1), task(t2)), 5003)
+        assertEquals("uncertain", p.views().single().state)
     }
 
     @Test fun `unknown snapshot clears old deadline and recovery needs new review`() {
@@ -188,7 +260,7 @@ class PermissionPolicyTest {
 
     @Test fun `visible operation survives timeout and hidden operation has a short fallback`() {
         val p = policy(); opened(p)
-        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 150)!!
+        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
         p.removed(t1, a.packageName, true, 200)
         p.reconcile(world(visible = setOf(b.packageName)), 201)
         p.reconcile(world(visible = setOf(b.packageName)), 700_000)
@@ -203,9 +275,9 @@ class PermissionPolicyTest {
     @Test fun `binding lifecycle holds a hidden operation until release within fallback`() {
         val p = policy(); opened(p)
         val target = CallTarget(b.packageName, "pay/Service", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, OpenSource.INTERACTION, 150)!!
+        val flow = p.beginFlow(a.packageName, null, target, 150)!!
         assertTrue(p.bind(flow, "connection", target, 151))
-        p.finishFlow(flow, canceled = false, now = 200)
+        p.finishFlow(flow, now = 200)
         p.reconcile(world(), 20_000)
         assertEquals("operation", p.views().first { it.app == b }.state)
         p.unbind("connection", 20_001)
@@ -220,20 +292,20 @@ class PermissionPolicyTest {
         p.opened(a.packageName, t1, OpenSource.LAUNCHER, 100)
         p.opened(b.packageName, t2, OpenSource.LAUNCHER, 100)
         p.reconcile(world(task(t1), task(t2, b.packageName)), 101)
-        val flow = p.observeFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
+        val flow = p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150, observed = true)!!
         p.removed(t1, a.packageName, true, 200)
         p.reconcile(world(task(t2, b.packageName)), 201)
         assertTrue(p.stops(20_000).isEmpty())
-        p.finishFlow(flow, false, 20_001)
+        p.finishFlow(flow, 20_001)
         assertTrue(p.stops(20_003).isEmpty())
         assertEquals(listOf(a), p.stops(20_503).map { it.app })
     }
 
     @Test fun `shared task participants stay protected until Activity lifecycle ends`() {
         val p = policy(); opened(p)
-        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 150)!!
+        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
         p.flowActivity(flow, "pay-activity", true, 151)
-        p.finishFlow(flow, false, 200)
+        p.finishFlow(flow, 200)
         p.reconcile(world(task(t1)), 20_000)
         assertEquals("operation", p.views().first { it.app == b }.state)
         p.flowActivity(flow, "pay-activity", false, 20_001)
@@ -246,7 +318,7 @@ class PermissionPolicyTest {
     @Test fun `operation target cannot grant unrelated services or unrelated packages`() {
         val p = policy()
         val target = CallTarget(b.packageName, "pay/Service", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, OpenSource.SYSTEM_CHOOSER, 100)!!
+        val flow = p.beginFlow(a.packageName, null, target, 100)!!
         p.reconcile(world(), 4000)
         assertTrue(p.entry(0, target, 4000, a).allow)
         assertFalse("an unrelated caller cannot reuse another operation", p.entry(0, target, 4000, c).allow)
@@ -323,10 +395,10 @@ class PermissionPolicyTest {
 
     @Test fun `return to visible shop does not retain a completed payment process`() {
         val p = policy(); opened(p)
-        val flow = p.beginFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 150)!!
+        val flow = p.beginFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
         p.flowActivity(flow, "pay-activity", true, 151)
         p.flowActivity(flow, "pay-activity", false, 200)
-        p.finishFlow(flow, false, 201)
+        p.finishFlow(flow, 201)
         p.reconcile(world(task(visible = true)), 40_000)
         assertTrue(p.flowDetails().isEmpty())
         assertTrue(p.stops(40_000).isEmpty())
@@ -336,7 +408,7 @@ class PermissionPolicyTest {
 
     @Test fun `unknown visible launch is observed without gaining a persistent card`() {
         val p = policy()
-        val flow = p.observeFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100)!!
+        val flow = p.beginFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100, observed = true)!!
         p.reconcile(world(task(t2, b.packageName, true)), 101)
         assertEquals(0, p.views().first { it.app == b }.cards)
         assertTrue(p.flowDetails().single().endsWith("observed"))
@@ -350,7 +422,7 @@ class PermissionPolicyTest {
 
     @Test fun `dependency grants remain inside actual flow participants and components`() {
         val p = policy()
-        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 100)!!
+        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100)!!
         val service = CallTarget(b.packageName, "pay/ResultService", EntryKind.BIND)
         assertTrue(p.dependency(flow, a.packageName, service, 101))
         assertFalse(p.dependency(flow, a.packageName, service.copy(packageName = c.packageName), 102))
@@ -363,9 +435,9 @@ class PermissionPolicyTest {
     @Test fun `one removed binding does not release another connection in the operation`() {
         val p = policy()
         val target = CallTarget(b.packageName, "pay/ResultService", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, OpenSource.INTERACTION, 100)!!
+        val flow = p.beginFlow(a.packageName, null, target, 100)!!
         p.bind(flow, "connection-1", target, 101); p.bind(flow, "connection-2", target, 102)
-        p.finishFlow(flow, false, 103)
+        p.finishFlow(flow, 103)
         p.unbind("connection-1", 104)
         p.reconcile(world(), 20_000)
         assertFalse(p.flowDetails().isEmpty())
@@ -387,7 +459,7 @@ class PermissionPolicyTest {
         p.visible(a.packageName, t1, true, 200)
         assertNull(p.manual(a.packageName))
         p.visible(a.packageName, t1, false, 201)
-        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), OpenSource.INTERACTION, 202)
+        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 202)
         assertNull(p.manual(b.packageName))
         assertNull(p.manual(a.packageName))
     }
@@ -413,8 +485,8 @@ class PermissionPolicyTest {
     @Test fun `concurrent operations require a unique activity association`() {
         val p = policy()
         val target = CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY)
-        val first = p.beginFlow(a.packageName, "source-1", target, OpenSource.INTERACTION, 100)!!
-        p.beginFlow(a.packageName, "source-2", target, OpenSource.INTERACTION, 101)!!
+        val first = p.beginFlow(a.packageName, "source-1", target, 100)!!
+        p.beginFlow(a.packageName, "source-2", target, 101)!!
         assertNull(p.flowFor(a.packageName))
         assertEquals(first, p.flowFor(a.packageName, "source-1"))
     }

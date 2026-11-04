@@ -92,7 +92,7 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun decide(packageNames: List<String>, mode: RuleMode) {
-        viewModelScope.launch { graph.decide(packageNames, mode) }
+        viewModelScope.launch { graph.rules.decide(packageNames, mode) }
     }
 
     fun setShowSystem(show: Boolean) {
