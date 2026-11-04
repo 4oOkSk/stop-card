@@ -119,7 +119,10 @@ class ModuleStore(private val fault: (String) -> Unit) {
         try {
             java.io.FileOutputStream(descriptor).use { output -> output.write(text.toByteArray(Charsets.UTF_8)); output.fd.sync() }
             Os.rename(tmp.path, file.path)
-        } finally { tmp.delete() }
+        } finally {
+            // Android streams do not own a descriptor supplied by the caller.
+            try { Os.close(descriptor) } finally { tmp.delete() }
+        }
     }
 
     private fun submit(rejected: () -> Unit = {}, action: () -> Unit) {

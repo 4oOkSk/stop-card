@@ -109,6 +109,7 @@ object ModuleRuntime : FrameworkCallbacks {
         override fun run() {
             try { tick() }
             catch (e: Throwable) {
+                if (readFailures == 0) android.util.Log.e("StopCard", "Control loop failed", e)
                 ready = false
                 factsFresh = false
                 policy.unknown(now())
@@ -197,7 +198,7 @@ object ModuleRuntime : FrameworkCallbacks {
     }
 
     private fun updatePriorities() {
-        val priority = if (enforcing() && current?.extraKeepAlive == true)
+        val priority = if (enforcing() && current?.extraKeepAlive == true && adapter.report()["extra_keep_alive"]?.status == "installed")
             facts?.groups.orEmpty().filterValues(policy::keepAlive).keys else emptySet()
         if (priority != protectedPriorities) {
             adapter.recomputePriority()
@@ -323,15 +324,20 @@ object ModuleRuntime : FrameworkCallbacks {
         val source = fact.source
         if (fact.evidence != null) {
             policy.opened(target.packageName, fact.target.task, fact.evidence, at)
-            if (source != null && source.packageName != target.packageName) {
+            // Direct opens activate a card; only app input starts or extends an operation.
+            if (fact.evidence == OpenSource.USER_INTERACTION && source != null && source.packageName != target.packageName) {
                 val existing = policy.flowFor(source.packageName, source.token)
                 val flow = if (existing != null && policy.extendFlow(existing, source.packageName, target, true, at)) existing
                     else policy.beginFlow(source.packageName, source.token, target, at)
                 if (flow != null) {
                     launches[fact.target.token] = flow
+                } else {
+                    policy.unknown(at)
+                    ready = false
+                    return EntryDecision(true, "operation_capacity_unknown")
                 }
             }
-            return EntryDecision(true, "user_open")
+            return EntryDecision(true, if (fact.evidence == OpenSource.USER_INTERACTION) "user_interaction" else "user_open")
         }
         val decision = policy.entry(0, target, at, source?.let { facts?.apps?.get(it.packageName) })
         val existing = source?.let { s -> facts?.apps?.get(s.packageName)?.let { policy.flowForCall(it, target) } }
@@ -411,7 +417,7 @@ object ModuleRuntime : FrameworkCallbacks {
         if (!ready || !factsFresh || paused) return EntryDecision(true, "initializing_or_paused")
         val caller = sourcePackage?.let { facts?.apps?.get(it) }?.takeIf { it.uid == sourceUid }
         var result = policy.entry(userId, target, now(), caller)
-        if (userId == 0 && caller != null && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
+        if (userId == 0 && result.reason != "essential" && caller != null && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
             val flow = policy.flowFor(caller.packageName)
             if (flow != null) policy.dependency(flow, caller.packageName, target, now())
             if (policy.flowForCall(caller, target) == null && (evidence != null || observed || policy.isVisible(caller.packageName))) {

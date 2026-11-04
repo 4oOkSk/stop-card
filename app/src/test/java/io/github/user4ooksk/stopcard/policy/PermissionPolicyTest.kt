@@ -429,6 +429,7 @@ class PermissionPolicyTest {
         assertFalse(p.dependency(flow, a.packageName, service.copy(component = null), 103))
         p.reconcile(world(), 4000)
         assertTrue(p.entry(0, service, 4000, a).allow)
+        assertFalse("an exact dependency of a confirmed flow is not observation", p.entry(0, service, 4000, a).wouldBlock)
         assertFalse(p.entry(0, service.copy(component = "pay/Unrelated"), 4000).allow)
     }
 
@@ -498,5 +499,85 @@ class PermissionPolicyTest {
         p.configure(rule.copy(generation = 3), 400)
         assertTrue(p.stops(400).isEmpty())
         assertEquals("exception_revoked", p.stops(900).single().reason)
+    }
+
+    @Test fun `confirmed multilevel flow keeps exact dependencies and releases only after all components finish`() {
+        val p = policy(); opened(p)
+        val pay = CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY)
+        val flow = p.beginFlow(a.packageName, "shop-page", pay, 150)!!
+        p.flowActivity(flow, "pay-page", true, 151)
+        assertTrue(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), true, 152))
+        p.flowActivity(flow, "bank-page", true, 153)
+        val service = CallTarget(b.packageName, "pay/Service", EntryKind.SERVICE)
+        val broadcast = CallTarget(c.packageName, "bank/Receiver", EntryKind.BROADCAST)
+        assertTrue(p.dependency(flow, a.packageName, service, 154))
+        assertTrue(p.dependency(flow, b.packageName, broadcast, 155))
+        p.flowActivity(flow, "service", true, 156)
+        p.flowActivity(flow, "broadcast:0", true, 157)
+        p.flowActivity(flow, "broadcast:1", true, 158)
+        p.reconcile(world(task()), 4000)
+        assertEquals("operation", p.entry(0, service, 4000, a).reason)
+        assertFalse(p.entry(0, service.copy(component = "pay/Other"), 4000, a).allow)
+        assertFalse(p.entry(0, service, 4000, c).allow)
+        for ((index, token) in listOf("bank-page", "pay-page", "service", "broadcast:0").withIndex()) {
+            p.flowActivity(flow, token, false, 4001L + index)
+            p.finishFlow(flow, 4001L + index)
+            assertEquals(flow, p.flowFor(b.packageName))
+        }
+        p.flowActivity(flow, "broadcast:1", false, 4010)
+        p.finishFlow(flow, 4010)
+        assertNull(p.flowFor(b.packageName))
+        assertTrue(p.stops(4011).isEmpty())
+        assertEquals(setOf(b, c), p.stops(4511).map { it.app }.toSet())
+        assertEquals("card", p.views().first { it.app == a }.state)
+    }
+
+    @Test fun `final unbind keeps protection until the bound service finishes destroying`() {
+        val p = policy(); opened(p)
+        val target = CallTarget(b.packageName, "pay/BoundService", EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, "shop-page", target, 150)!!
+        assertTrue(p.bind(flow, "connection", target, 151, a))
+        p.flowActivity(flow, "service-record", true, 152)
+        p.finishFlow(flow, 153)
+        p.unbind("connection", 4000)
+        assertEquals(flow, p.flowFor(b.packageName))
+        assertTrue(p.stops(4500).isEmpty())
+        p.flowActivity(flow, "service-record", false, 5000)
+        p.finishFlow(flow, 5000)
+        assertNull(p.flowFor(b.packageName))
+        assertTrue(p.stops(5001).isEmpty())
+        assertEquals(b, p.stops(5501).single().app)
+    }
+
+    @Test fun `cross app input cannot activate a persistent card or the direct open window`() {
+        val p = policy()
+        p.opened(b.packageName, t2, OpenSource.USER_INTERACTION, 100)
+        p.reconcile(world(task(t2, b.packageName, true)), 101)
+        assertEquals(0, p.views().first { it.app == b }.cards)
+        p.reconcile(world(), 102)
+        assertFalse(p.entry(0, CallTarget(b.packageName, kind = EntryKind.NOTIFICATION), 103).allow)
+    }
+
+    @Test fun `broadcast record holds an ordered operation between successive receiver deliveries`() {
+        val p = policy(); opened(p)
+        val first = CallTarget(b.packageName, "pay/FirstReceiver", EntryKind.BROADCAST)
+        val flow = p.beginFlow(a.packageName, "shop-page", first, 150)!!
+        p.flowActivity(flow, "broadcast-record", true, 151)
+        p.flowActivity(flow, "broadcast:0", true, 152)
+        p.flowActivity(flow, "broadcast:0", false, 4000)
+        p.finishFlow(flow, 4000)
+        assertEquals(flow, p.flowFor(b.packageName))
+        val next = first.copy(component = "pay/NextReceiver")
+        assertTrue(p.dependency(flow, a.packageName, next, 4001))
+        assertEquals("operation", p.entry(0, next, 4001, a).reason)
+        p.flowActivity(flow, "broadcast:1", true, 4002)
+        p.flowActivity(flow, "broadcast:1", false, 7000)
+        p.finishFlow(flow, 7000)
+        assertEquals(flow, p.flowFor(b.packageName))
+        p.flowActivity(flow, "broadcast-record", false, 7001)
+        p.finishFlow(flow, 7001)
+        assertNull(p.flowFor(b.packageName))
+        assertTrue(p.stops(7002).isEmpty())
+        assertEquals(b, p.stops(7502).single().app)
     }
 }

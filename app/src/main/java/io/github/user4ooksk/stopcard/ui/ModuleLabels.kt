@@ -2,6 +2,7 @@ package io.github.user4ooksk.stopcard.ui
 
 fun capabilityLabel(key: String): String = when (key) {
     "activity" -> "Activity 启动与操作来源"
+    "user_input" -> "用户触摸来源核验"
     "activity_gate", "activity_request" -> "Activity 原生拒绝与来源核验"
     "task_remove" -> "划卡与任务移除"
     "force_stop" -> "系统原生强停"
@@ -15,6 +16,7 @@ fun capabilityLabel(key: String): String = when (key) {
     "activity_finish" -> "操作页面结束"
     "service_context", "service_lookup" -> "服务启动"
     "service_finish" -> "实际服务结束"
+    "service_teardown" -> "未运行服务撤销"
     "bind_context", "binding_lifetime", "binding_remove" -> "服务绑定与解除"
     "notifications" -> "通知入队"
     "notification_open" -> "通知点击与操作来源"

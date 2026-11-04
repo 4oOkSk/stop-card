@@ -28,7 +28,10 @@ data class SystemFactSnapshot(
 
 /** Worker-only reads. Failure is unknown; callers retain previous facts and suspend enforcement. */
 class SystemFacts(private val context: Context) {
-    private val pm = context.packageManager
+    // A framework restart can create the system context before package service publication.
+    // Retry the lookup with the inventory instead of retaining an unavailable service forever.
+    private val pm: PackageManager
+        get() = checkNotNull(context.packageManager) { "Package service unavailable" }
 
     fun read(): SystemFactSnapshot {
         @Suppress("DEPRECATION")

@@ -3,7 +3,7 @@ package io.github.user4ooksk.stopcard.policy
 import java.util.concurrent.atomic.AtomicLong
 
 /** Facts have framework provenance. Intent extras never create an [OpenSource]. */
-enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION }
+enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION, USER_INTERACTION }
 enum class EntryKind { ACTIVITY, SERVICE, BIND, BROADCAST, PROVIDER, JOB, ALARM, PENDING_INTENT, PROCESS, NOTIFICATION }
 
 data class AppKey(
@@ -184,6 +184,8 @@ class PermissionPolicy {
      * work even if the new Activity opens and hides between two reconciliation snapshots.
      */
     @Synchronized fun opened(pkg: String, task: TaskKey?, source: OpenSource, now: Long) {
+        // Cross-app input confirms an operation; only direct open sources activate cards.
+        if (source == OpenSource.USER_INTERACTION) return
         val t = track(pkg) ?: return
         invalidate(pkg)
         t.stopped = false
@@ -355,7 +357,7 @@ class PermissionPolicy {
         if (f.observed || !contains(f, from) || !contains(f, target.packageName) || target.component.isNullOrBlank() ||
             target.kind !in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST) ||
             f.grants.size >= MAX_FLOW_TARGETS) return false
-        f.grants += Grant(apps.getValue(from), target, true)
+        f.grants += Grant(apps.getValue(from), target, false)
         f.reviewAt = now + rule.hiddenReviewMs
         invalidate(target.packageName)
         publish(now)

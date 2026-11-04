@@ -18,3 +18,9 @@ build/
 # Local task material and signing material
 .local/
 *.p12
+/artifacts/
+/signing/
+/SHA256SUMS.txt
+/stop-card-handoff-*.zip
+/HANDOFF.md
+/docs/device-test-????-??-??.md

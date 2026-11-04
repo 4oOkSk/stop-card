@@ -8,6 +8,9 @@ import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.os.Binder
 import android.os.IBinder
+import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import io.github.user4ooksk.stopcard.policy.*
@@ -65,6 +68,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val systemUiProcesses = ConcurrentHashMap<Int, Int>()
     private data class BroadcastOrigin(val caller: ActivityFact, val evidence: OpenSource?, val observed: Boolean)
     private val broadcastOrigins = java.util.WeakHashMap<Any, BroadcastOrigin>()
+    private val interactions = InputProvenance()
+    private val pointerDown = ConcurrentHashMap<Int, ActivityFact>()
     private data class ServiceCall(val kind: EntryKind, val source: String?, val uid: Int, var record: Any? = null)
 
     @Volatile private var atm: Any? = null
@@ -93,6 +98,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         captureClass("com.android.server.am.ActivityManagerService", "system_ready") { ams = it }
         captureClass("com.android.server.notification.NotificationManagerService", "notification_service") { nms = it }
         taskHooks()
+        inputHooks()
         activityHooks()
         serviceHooks()
         notificationHooks()
@@ -168,6 +174,35 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         })
     }
 
+    private fun inputHooks() {
+        hook("user_input", "com.android.server.wm.PointerEventDispatcher", "onInputEvent", {
+            it.returnType == Void.TYPE && names(it) == listOf("android.view.InputEvent")
+        }, before = { p ->
+            val event = p.args[0] as? MotionEvent ?: return@hook
+            if (event.source and InputDevice.SOURCE_CLASS_POINTER == 0) return@hook
+            val action = event.actionMasked
+            if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL) return@hook
+            val displayId = call(event, "getDisplayId") as Int
+            if (action == MotionEvent.ACTION_CANCEL) { pointerDown.remove(displayId); return@hook }
+            val down = pointerDown.remove(displayId)
+            if (event.flags and (MotionEvent.FLAG_WINDOW_IS_OBSCURED or MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED) != 0) return@hook
+            val service = wm ?: return@hook
+            val source = synchronized(field(service, "mGlobalLock")!!) {
+                val display = call(field(service, "mRoot")!!, "getDisplayContent", displayId) ?: return@synchronized null
+                val window = call(display, "getTouchableWinAtPointLocked", event.x, event.y) ?: return@synchronized null
+                field(window, "mActivityRecord")?.let(::activityFact)
+            } ?: return@hook
+            if (!source.visible || source.uid / 100000 != 0) return@hook
+            if (action == MotionEvent.ACTION_DOWN) {
+                check(pointerDown.size < 16) { "Pointer display limit" }
+                pointerDown[displayId] = source
+            } else if (down != null && down.token == source.token && down.uid == source.uid && down.packageName == source.packageName) {
+                interactions.record(source.uid, source.packageName, source.token, event.eventTime)
+            }
+            // The event is observed only. Android still dispatches and finishes it normally.
+        })
+    }
+
     private fun activityHooks() {
         hook("activity_request", "com.android.server.wm.ActivityStarter", "executeRequest", {
             it.returnType == Int::class.javaPrimitiveType && names(it) == listOf("com.android.server.wm.ActivityStarter\$Request")
@@ -206,12 +241,15 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val source = p.args[1]?.let(::activityFact) ?: pendingCaller.get()
             val callingUid = field(r, "launchedFromUid") as Int
             val intent = field(r, "intent") as Intent
+            val info = field(r, "info") as ActivityInfo
+            val component = ComponentName(info.packageName, info.name).flattenToString()
             val evidence = launchSource.get() ?: when {
                 callingUid in launcherUids && intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER) -> OpenSource.LAUNCHER
+                source != null && source.visible && source.uid == callingUid &&
+                    interactions.claim(source.uid, source.packageName, source.token, target.packageName, SystemClock.uptimeMillis()) -> OpenSource.USER_INTERACTION
                 else -> null
             }
-            val info = field(r, "info") as ActivityInfo
-            val fact = LaunchFact(source, target, ComponentName(info.packageName, info.name).flattenToString(), evidence, pendingObserved.get() == true)
+            val fact = LaunchFact(source, target, component, evidence, pendingObserved.get() == true)
             p.setObjectExtra("stopcard.launch", fact)
             sink.launch(fact) // Rejection belongs to the earlier native firewall boundary.
         }, after = { p ->
@@ -252,13 +290,12 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             }, after = { p ->
                 val context = serviceCalls.get()
                 val record = context?.record
-                if (kind == EntryKind.SERVICE && record != null) {
+                if (record != null) {
                     val name = field(record, "name") as ComponentName
-                    sink.component(token(record), context.source, CallTarget(name.packageName, name.flattenToString(), kind), !p.hasThrowable() && p.result == name)
-                }
-                if (kind == EntryKind.BIND && record != null && (p.hasThrowable() || (p.result as? Int ?: 0) <= 0)) {
-                    val name = field(record, "name") as ComponentName
-                    sink.component("failed_bind:${token(record)}", context.source, CallTarget(name.packageName, name.flattenToString(), kind), false)
+                    val success = !p.hasThrowable() && if (kind == EntryKind.SERVICE) p.result == name else (p.result as? Int ?: 0) > 0
+                    // A bound service can still be executing onDestroy after its final unbind.
+                    val id = if (kind == EntryKind.BIND && !success) "failed_bind:${token(record)}" else token(record)
+                    sink.component(id, context.source, CallTarget(name.packageName, name.flattenToString(), kind), success)
                 }
             })
         }
@@ -299,9 +336,23 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         }, after = { p ->
             sink.binding(token(p.args[0]), null, CallTarget("", kind = EntryKind.BIND), false)
         })
-        hook("service_finish", "com.android.server.am.ActiveServices", "bringDownServiceLocked", {
-            it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.ServiceRecord", "boolean")
-        }, after = { p -> if (!p.hasThrowable()) sink.activityFinished(token(p.args[0])) })
+        // bringDownServiceLocked only schedules onDestroy. Release after Android processes the
+        // completion (also used when the hosting process dies), never while onDestroy is running.
+        hook("service_finish", "com.android.server.am.ActiveServices", "serviceDoneExecutingLocked", {
+            it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.ServiceRecord", "boolean", "boolean", "boolean", "int")
+        }, after = { p ->
+            if (!p.hasThrowable() && p.args[2] == true && (field(p.args[0], "executeNesting") as Int) <= 0)
+                sink.activityFinished(token(p.args[0]))
+        })
+        hook("service_teardown", "com.android.server.am.ActiveServices", "bringDownServiceLocked", {
+            it.returnType == Void.TYPE && names(it) in listOf(
+                listOf("com.android.server.am.ServiceRecord", "boolean"),
+                listOf("com.android.server.am.ServiceRecord", "boolean", "int"))
+        }, after = { p ->
+            // Cancelled pending services have no app callback. A scheduled destroy has nesting > 0.
+            if (!p.hasThrowable() && field(p.args[0], "destroying") == false && field(p.args[0], "executeNesting") == 0)
+                sink.activityFinished(token(p.args[0]))
+        })
     }
 
     private fun notificationHooks() {
@@ -346,9 +397,16 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             capabilities["broadcast_origin"] = HookCapability("installed", listOf("BroadcastRecord.<init>"))
         } catch (e: Throwable) { unavailable("broadcast_origin", e) }
         hook("broadcast", "com.android.server.am.BroadcastSkipPolicy", "shouldSkipMessage", {
-            it.returnType == String::class.java && names(it) == listOf("com.android.server.am.BroadcastRecord", "java.lang.Object")
+            // The Object overloads only forward and can be inlined by ART. Observe the native
+            // policy bodies so cold and warm receivers both pass the same permission boundary.
+            val types = names(it)
+            it.returnType == String::class.java && types.size in 2..3 &&
+                types[0] == "com.android.server.am.BroadcastRecord" &&
+                types[1] in setOf("android.content.pm.ResolveInfo", "com.android.server.am.BroadcastFilter") &&
+                (types.size == 2 || types[2] == "boolean")
         }, after = { p ->
             if (p.result != null || p.hasThrowable()) return@hook
+            if (p.args.size == 3 && p.args[2] == true) return@hook // Native enqueue preflight is not delivery.
             val receiver = p.args[1]
             val info = if (receiver is android.content.pm.ResolveInfo) receiver.activityInfo else null
             val pkg = info?.packageName ?: field(receiver, "packageName") as? String ?: return@hook
@@ -356,28 +414,42 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val component = info?.let { ComponentName(it.packageName, it.name).flattenToString() }
             val record = p.args[0]
             val origin = synchronized(broadcastOrigins) { broadcastOrigins[record] }
-            val decision = sink.entry(uid / 100000, CallTarget(pkg, component, EntryKind.BROADCAST),
-                field(record, "callingUid") as Int, field(record, "callerPackage") as? String, origin?.evidence, origin?.observed == true)
+            val callerUid = field(record, "callingUid") as Int
+            val callerPackage = field(record, "callerPackage") as? String
+            val target = CallTarget(pkg, component, EntryKind.BROADCAST)
+            val decision = sink.entry(uid / 100000, target,
+                callerUid, callerPackage, origin?.evidence ?: inputEvidence(callerUid, callerPackage, pkg), origin?.observed == true)
             if (!decision.allow) p.result = "Stop Card: no runtime permission"
-            // BroadcastQueueModernImpl consumes this reason in both cold and warm dispatch,
+            else sink.component(token(record), callerPackage, target, true)
+            // The native queue consumes this reason in both cold and warm dispatch,
             // sets DELIVERY_SKIPPED, and advances completion/timeout state itself.
         })
-        hook("broadcast_lifetime", "com.android.server.am.BroadcastQueueModernImpl", "setDeliveryState", {
-            it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.BroadcastProcessQueue", "com.android.server.am.ProcessRecord", "com.android.server.am.BroadcastRecord", "int", "java.lang.Object", "int", "java.lang.String")
+        // The queue was renamed in Android 17. The record owns the actual state transition on
+        // both versions; inspect its committed state, including no-op terminal transitions.
+        hook("broadcast_lifetime", "com.android.server.am.BroadcastRecord", "setDeliveryState", {
+            it.returnType == Boolean::class.javaPrimitiveType && names(it) in listOf(
+                listOf("int", "int", "java.lang.String"), listOf("int", "int", "java.lang.String", "int"))
+        }, before = { p ->
+            p.setObjectExtra("stopcard.delivery", (field(p.thisObject, "delivery") as IntArray)[p.args[0] as Int])
         }, after = { p ->
             if (p.hasThrowable()) return@hook
-            val r = p.args[2]
-            val receiver = p.args[4]
+            val r = p.thisObject
+            val index = p.args[0] as Int
+            val state = (field(r, "delivery") as IntArray)[index]
+            val previous = p.getObjectExtra("stopcard.delivery") as Int
+            if (state == previous) return@hook
+            val receiver = (field(r, "receivers") as List<*>)[index] ?: return@hook
             val info = (receiver as? android.content.pm.ResolveInfo)?.activityInfo
             val pkg = info?.packageName ?: field(receiver, "packageName") as? String ?: return@hook
             val name = info?.let { ComponentName(it.packageName, it.name).flattenToString() }
-            val state = p.args[5] as Int
-            val type = r.javaClass
-            val scheduled = type.getDeclaredField("DELIVERY_SCHEDULED").apply { isAccessible = true }.getInt(null)
-            val terminal = type.getDeclaredMethod("isDeliveryStateTerminal", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(null, state) == true
-            if (state == scheduled || terminal) sink.component("${token(r)}:${p.args[3]}", field(r, "callerPackage") as? String,
+            // Release ROMs can strip the compile-time constants; use the record's native names.
+            val scheduled = call(r, "deliveryStateToString", state) == "SCHEDULED"
+            val terminal = call(r, "isDeliveryStateTerminal", state) == true
+            if (scheduled || (terminal && call(r, "deliveryStateToString", previous) == "SCHEDULED")) sink.component("${token(r)}:$index", field(r, "callerPackage") as? String,
                 CallTarget(pkg, name, EntryKind.BROADCAST), !terminal)
             if (terminal && field(r, "terminalCount") == (field(r, "receivers") as List<*>).size) {
+                // An ordered broadcast may have no scheduled receiver between two deliveries.
+                sink.activityFinished(token(r))
                 synchronized(broadcastOrigins) { broadcastOrigins.remove(r) }
             }
         })
@@ -504,10 +576,27 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
 
     fun recentsCaller(uid: Int, pid: Int): Boolean = uid in launcherUids || trustedSystemUi(uid, pid)
 
-    private fun entry(userId: Int, target: CallTarget, sourceUid: Int = -1, sourcePackage: String? = null): EntryDecision =
-        sink.entry(userId, target, sourceUid, sourcePackage, launchSource.get(), pendingObserved.get() == true)
+    private fun entry(userId: Int, target: CallTarget, sourceUid: Int = -1, sourcePackage: String? = null): EntryDecision {
+        val evidence = launchSource.get() ?: inputEvidence(sourceUid, sourcePackage, target.packageName)
+        return sink.entry(userId, target, sourceUid, sourcePackage, evidence, pendingObserved.get() == true)
+    }
+
+    private fun inputEvidence(uid: Int, pkg: String?, target: String): OpenSource? =
+        if (pkg != null && interactions.claim(uid, pkg, null, target, SystemClock.uptimeMillis())) OpenSource.USER_INTERACTION else null
 
     private fun keepAliveHooks() {
+        if (runCatching { Class.forName("com.android.server.am.psc.ProcessRecordInternal", false, loader) }.isSuccess) {
+            // The small setter can be inlined. Adjust the final computed value immediately
+            // before Android applies it, retaining native batching, observers and LMKD updates.
+            hook("extra_keep_alive", "com.android.server.am.psc.OomAdjuster", "applyOomAdjLSP", {
+                it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.psc.ProcessRecordInternal", "boolean")
+            }, before = { p ->
+                val app = p.args[0]
+                val adj = call(app, "getCurAdj") as Int
+                if (adj in 900..999 && sink.keepAlive(field(app, "uid") as Int)) call(app, "setCurAdj", 900)
+            })
+            return
+        }
         hook("extra_keep_alive", "com.android.server.am.ProcessStateRecord", "setCurAdj", {
             it.returnType == Void.TYPE && names(it) == listOf("int")
         }, before = { p ->

@@ -48,6 +48,10 @@ public class ProbeActivity extends Activity {
         button("Picture in picture", () -> enterPictureInPictureMode(new PictureInPictureParams.Builder()
             .setAspectRatio(new Rational(16, 9)).build()));
         button("Open target flow with result and binding", this::openFlow);
+        button("Start target Service now (stop in 3 s; destroy takes 1 s)", () -> event("start returned " +
+            startService(component(target(), CLASS + "$ProbeService").putExtra("stop_after_ms", 3_000L))));
+        button("Send target async broadcast now (finish in 3 s)", () ->
+            sendBroadcast(component(target(), CLASS + "$ProbeReceiver").putExtra("async_ms", 3_000L)));
         button("Delayed target Activity (5 s, then press Home)", () -> later(() -> startActivity(component(target(), CLASS + "$Flow"))));
         button("Start target Service after 5 s", () -> later(() -> event("start returned " + startService(component(target(), CLASS + "$ProbeService")))));
         button("Bind target Service after 5 s", () -> later(() -> bindTarget()));
@@ -167,17 +171,39 @@ public class ProbeActivity extends Activity {
         @Override protected void onDestroy() { record(this, "Flow destroyed"); super.onDestroy(); }
     }
     public static class ProbeService extends Service {
+        private boolean slowDestroy;
         @Override public void onCreate() { super.onCreate(); record(this, "Service created"); }
-        @Override public int onStartCommand(Intent i, int flags, int id) { record(this, "Service started"); return START_NOT_STICKY; }
+        @Override public int onStartCommand(Intent i, int flags, int id) {
+            record(this, "Service started");
+            long delay = i == null ? 0 : i.getLongExtra("stop_after_ms", 0);
+            if (delay > 0) {
+                slowDestroy = true;
+                new Handler(Looper.getMainLooper()).postDelayed(() -> { record(this, "Service stopSelf"); stopSelf(id); }, delay);
+            }
+            return START_NOT_STICKY;
+        }
         @Override public IBinder onBind(Intent i) { record(this, "Service bound"); return new Binder(); }
         @Override public boolean onUnbind(Intent i) { record(this, "Service unbound"); return false; }
-        @Override public void onDestroy() { record(this, "Service destroyed"); super.onDestroy(); }
+        @Override public void onDestroy() {
+            record(this, "Service destroy begin");
+            if (slowDestroy) SystemClock.sleep(1_000); // Explicit probe of premature lifecycle release.
+            record(this, "Service destroyed"); super.onDestroy();
+        }
     }
     public static class ForegroundProbe extends ProbeService {
         @Override public void onCreate() { super.onCreate(); startForeground(2, notification(this)); record(this, "foreground requested"); }
     }
     public static class ProbeReceiver extends BroadcastReceiver {
-        @Override public void onReceive(Context context, Intent i) { record(context, "Broadcast delivered"); }
+        @Override public void onReceive(Context context, Intent i) {
+            record(context, "Broadcast delivered");
+            long delay = i.getLongExtra("async_ms", 0);
+            if (delay > 0) {
+                PendingResult pending = goAsync();
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    record(context, "Broadcast async finish"); pending.finish();
+                }, delay);
+            }
+        }
     }
     public static class ProbeJob extends JobService {
         @Override public boolean onStartJob(JobParameters p) { record(this, "Job delivered"); return false; }
