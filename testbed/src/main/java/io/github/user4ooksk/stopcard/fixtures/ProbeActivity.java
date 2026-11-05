@@ -96,6 +96,10 @@ public class ProbeActivity extends Activity {
         });
         button("Pin own test widget", () -> event("widget pin requested " +
             getSystemService(android.appwidget.AppWidgetManager.class).requestPinAppWidget(new ComponentName(this, ProbeWidget.class), null, null)));
+        button("Open target from application context", () -> getApplicationContext().startActivity(
+            component(target(), CLASS + "$Flow").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)));
+        button("Delayed application-context Activity (5 s, then press Home)", () -> later(() ->
+            getApplicationContext().startActivity(component(target(), CLASS + "$Flow").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))));
         button("Refresh local event log", this::refresh);
         output = new TextView(this);
         column.addView(output);

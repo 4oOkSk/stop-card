@@ -65,6 +65,10 @@ adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager
 
 使用真实触摸触发跳转。直接用 ADB 启动目标页面，不能验证用户输入来源。
 
+- 点击 `Open target from application context`，确认无返回结果令牌的 `NEW_TASK` 页面能打开，并按临时操作保护；不增加目标的持久卡片。
+- 点击 `Delayed application-context Activity (5 s, then press Home)` 后立即回桌面，确认无其他许可的后台跳转仍受限制。
+- 在前台应用点击已下载文件的安装入口，确认第三方安装器能打开。取消安装并返回，确认模块就绪且无需添加例外。
+
 普通操作还需覆盖隐藏超过 30 秒的情况。记录临时许可撤销后，模块是否再次检查可见窗口、卡片和例外。
 
 ## 检查快捷开关与 VPN

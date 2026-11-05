@@ -19,6 +19,7 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Consumer
+import java.util.function.Predicate
 
 data class HookCapability(val status: String, val methods: List<String> = emptyList(), val detail: String = "")
 data class ActivityFact(val token: String, val packageName: String, val uid: Int, val task: TaskKey?, val visible: Boolean)
@@ -65,6 +66,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val pendingObserved = ThreadLocal<Boolean?>()
     private val pendingCaller = ThreadLocal<ActivityFact?>()
     private val activityRequest = ThreadLocal<Any?>()
+    private val activityCaller = ThreadLocal<ActivityFact?>()
     private val serviceCalls = ThreadLocal<ServiceCall?>()
     private data class Caller(val uid: Int, val pid: Int)
     private val closeCaller = ThreadLocal<Caller?>()
@@ -249,7 +251,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private fun activityHooks() {
         hook("activity_request", "com.android.server.wm.ActivityStarter", "executeRequest", {
             it.returnType == Int::class.javaPrimitiveType && names(it) == listOf("com.android.server.wm.ActivityStarter\$Request")
-        }, before = { p -> activityRequest.set(p.args[0]) })
+        }, before = { p -> activityRequest.set(p.args[0]); activityCaller.remove() })
         hook("activity_gate", "com.android.server.firewall.IntentFirewall", "checkStartActivity", {
             it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("android.content.Intent", "int", "int", "java.lang.String", "android.content.pm.ApplicationInfo")
         }, after = { p ->
@@ -259,11 +261,16 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             if (info.uid / 100000 != 0) return@hook
             val intent = p.args[0] as Intent
             val caller = p.args[1] as Int
+            val callerPackage = field(request, "callingPackage") as? String
             val sourceToken = field(request, "resultTo") as? IBinder
             val source = sourceToken?.let {
                 Class.forName("com.android.server.wm.ActivityRecord", false, loader)
                     .getDeclaredMethod("forTokenLocked", IBinder::class.java).apply { isAccessible = true }.invoke(null, it)
-            }?.let(::activityFact)
+            }?.let(::activityFact)?.takeIf { it.uid == caller && it.packageName == callerPackage }
+                ?: visibleCaller(caller, callerPackage)
+            // Application-context/NEW_TASK launches have no resultTo or sourceRecord. Retain the
+            // actual visible caller for both the firewall and subsequent operation tracking.
+            activityCaller.set(source)
             // Native firewall rejection sends RESULT_CANCELED and aborts options before a new
             // ActivityRecord/transition exists. Do not short-circuit startActivityInner cleanup.
             val userOpen = launchSource.get() != null || pendingObserved.get() == true || (caller in launcherUids &&
@@ -272,7 +279,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 val resolved = field(request, "activityInfo") as? ActivityInfo
                 val component = resolved?.let { ComponentName(it.packageName, it.name).flattenToString() }
                 if (!sink.entry(0, CallTarget(info.packageName, component, EntryKind.ACTIVITY), caller,
-                        field(request, "callingPackage") as? String).allow) p.result = false
+                        callerPackage).allow) p.result = false
             }
         })
         hook("activity", "com.android.server.wm.ActivityStarter", "startActivityInner", {
@@ -281,8 +288,10 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val r = p.args[0]
             val target = activityFact(r)
             if (target.uid / 100000 != 0) return@hook
-            val source = p.args[1]?.let(::activityFact) ?: pendingCaller.get()
             val callingUid = field(r, "launchedFromUid") as Int
+            val source = p.args[1]?.let(::activityFact)
+                ?: activityCaller.get()?.takeIf { it.uid == callingUid }
+                ?: pendingCaller.get()
             val intent = field(r, "intent") as Intent
             val info = field(r, "info") as ActivityInfo
             val component = ComponentName(info.packageName, info.name).flattenToString()
@@ -319,6 +328,19 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             sink.activityFinished(token)
             sink.wake()
         })
+    }
+
+    /** Called within ActivityStarter's native WM lock; package strings alone confer no trust. */
+    private fun visibleCaller(uid: Int, pkg: String?): ActivityFact? {
+        if (uid < 10000 || uid / 100000 != 0 || pkg.isNullOrBlank()) return null
+        val service = atm ?: return null
+        val root = field(service, "mRootWindowContainer") ?: return null
+        val record = call(root, "getActivity", Predicate<Any> { record ->
+            val info = field(record, "info") as ActivityInfo
+            info.applicationInfo.uid == uid && info.packageName == pkg &&
+                (call(record, "isVisible") == true || call(record, "isVisibleRequested") == true)
+        }) ?: return null
+        return activityFact(record)
     }
 
     private fun serviceHooks() {
@@ -818,7 +840,10 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     // Save context even when a capability was disabled by an earlier invocation.
                     // The paired finally must restore an enclosing call's exact provenance.
                     when {
-                        capability == "activity_request" -> param.setObjectExtra("stopcard.request", activityRequest.get())
+                        capability == "activity_request" -> {
+                            param.setObjectExtra("stopcard.request", activityRequest.get())
+                            param.setObjectExtra("stopcard.activityCaller", activityCaller.get())
+                        }
                         capability.startsWith("close_context_") -> param.setObjectExtra("stopcard.closeCaller", closeCaller.get())
                         capability.endsWith("_context") -> param.setObjectExtra("stopcard.previous", serviceCalls.get())
                         capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
@@ -836,7 +861,10 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                         // Restore provenance even if a capability disabled itself during entry.
                         // Nested service/PI calls must not leave trust on the Binder thread.
                         when {
-                            capability == "activity_request" -> activityRequest.set(param.getObjectExtra("stopcard.request"))
+                            capability == "activity_request" -> {
+                                activityRequest.set(param.getObjectExtra("stopcard.request"))
+                                activityCaller.set(param.getObjectExtra("stopcard.activityCaller") as? ActivityFact)
+                            }
                             capability.startsWith("close_context_") -> closeCaller.set(param.getObjectExtra("stopcard.closeCaller") as? Caller)
                             capability.endsWith("_context") -> serviceCalls.set(param.getObjectExtra("stopcard.previous") as? ServiceCall)
                             capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
