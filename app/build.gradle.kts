@@ -14,7 +14,7 @@ val keystoreProperties = Properties().apply {
     if (file.exists()) file.inputStream().use(::load)
 }
 
-val appVersionName = "0.2.7"
+val appVersionName = "0.3.0"
 val moduleSigner = if (keystoreProperties.isEmpty()) "" else {
     val store = KeyStore.getInstance(KeyStore.getDefaultType())
     rootProject.file(keystoreProperties.getProperty("storeFile")).inputStream().use {
@@ -39,7 +39,7 @@ android {
         // Built against the Android 17 platform (API 37.0) from the SDK canary channel.
         // The first device target is Android 17; targetSdk stays 36 until behavior changes are checked.
         targetSdk = 36
-        versionCode = 9
+        versionCode = 10
         versionName = appVersionName
         buildConfigField("String", "MODULE_SIGNER_SHA256", "\"$moduleSigner\"")
     }

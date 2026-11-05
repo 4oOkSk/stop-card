@@ -30,6 +30,7 @@ fun reasonLabel(reason: StopReason): String = when (reason) {
     StopReason.MANUAL -> "手动停止"
     StopReason.FLOW_FINISHED -> "操作完成后停止"
     StopReason.UNLICENSED_RUNNING -> "无许可后台运行"
+    StopReason.CLOSED_APP_RESTARTED -> "已停止应用后台重启"
     StopReason.OBSERVE -> "观察：本来会停止"
     StopReason.ERROR -> "状态或执行错误"
     StopReason.REVIEW -> "等待复核"

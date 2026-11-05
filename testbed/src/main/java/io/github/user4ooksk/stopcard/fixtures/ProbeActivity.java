@@ -52,6 +52,21 @@ public class ProbeActivity extends Activity {
             startService(component(target(), CLASS + "$ProbeService").putExtra("stop_after_ms", 3_000L))));
         button("Send target async broadcast now (finish in 3 s)", () ->
             sendBroadcast(component(target(), CLASS + "$ProbeReceiver").putExtra("async_ms", 3_000L)));
+        button("Finish card then bind target after 5 s", () -> {
+            Context app = getApplicationContext();
+            handler.postDelayed(() -> attempt(() -> {
+                ServiceConnection callback = new ServiceConnection() {
+                    public void onServiceConnected(ComponentName name, IBinder binder) {
+                        record(app, "background binding connected " + name);
+                        app.unbindService(this);
+                    }
+                    public void onServiceDisconnected(ComponentName name) { }
+                };
+                record(app, "background bind returned " + app.bindService(
+                    component(target(), CLASS + "$ProbeService"), callback, Context.BIND_AUTO_CREATE));
+            }), 5_000);
+            finishAndRemoveTask();
+        });
         button("Delayed target Activity (5 s, then press Home)", () -> later(() -> startActivity(component(target(), CLASS + "$Flow"))));
         button("Start target Service after 5 s", () -> later(() -> event("start returned " + startService(component(target(), CLASS + "$ProbeService")))));
         button("Bind target Service after 5 s", () -> later(() -> bindTarget()));

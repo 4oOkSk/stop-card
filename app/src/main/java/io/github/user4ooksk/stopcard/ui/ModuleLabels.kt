@@ -1,12 +1,10 @@
 package io.github.user4ooksk.stopcard.ui
 
 fun capabilityLabel(key: String): String = when (key) {
-    "activity" -> "Activity 启动与操作来源"
-    "user_input" -> "用户触摸来源核验"
-    "activity_gate", "activity_request" -> "Activity 原生拒绝与来源核验"
+    "activity" -> "页面启动状态"
     "task_remove" -> "划卡与任务移除"
     "force_stop" -> "系统原生强停"
-    "user_task_close", "close_context_removeTask", "close_context_removeAllVisibleRecentTasks" -> "最近任务关闭来源"
+    "user_task_close" -> "最近任务移除"
     "ui_process_identity" -> "系统界面进程身份"
     "role_changes" -> "系统角色变更"
     "fact_changes" -> "安装、设置和网络变更"

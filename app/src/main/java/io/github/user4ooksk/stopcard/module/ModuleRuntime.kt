@@ -327,54 +327,25 @@ object ModuleRuntime : FrameworkCallbacks {
         if (fact.target.uid >= 0 && fact.target.uid / 100000 != 0) return EntryDecision(true, "other_user")
         if (defer(fact.target.packageName, fact.target.uid) { launch(fact) }) return EntryDecision(true, "initializing")
         val at = now()
+        policy.starting(fact.target.packageName, at)
         val target = CallTarget(fact.target.packageName, fact.component, EntryKind.ACTIVITY)
         val source = fact.source
-        if (fact.evidence != null) {
-            policy.opened(target.packageName, fact.target.task, fact.evidence, at)
-            // Direct opens activate a card; only app input starts or extends an operation.
-            if (fact.evidence == OpenSource.USER_INTERACTION && source != null && source.packageName != target.packageName) {
-                val existing = policy.flowFor(source.packageName, source.token)
-                val flow = if (existing != null && policy.extendFlow(existing, source.packageName, target, true, at)) existing
-                    else policy.beginFlow(source.packageName, source.token, target, at)
-                if (flow != null) {
-                    launches[fact.target.token] = flow
-                } else {
-                    policy.unknown(at)
-                    ready = false
-                    return EntryDecision(true, "operation_capacity_unknown")
-                }
-            }
-            return EntryDecision(true, if (fact.evidence == OpenSource.USER_INTERACTION) "user_interaction" else "user_open")
+        if (source != null && source.packageName != target.packageName && fact.component.isNotBlank()) {
+            val existing = policy.flowFor(source.packageName, source.token)
+            val flow = if (existing != null && policy.extendFlow(existing, source.packageName, target, at)) existing
+                else policy.beginFlow(source.packageName, source.token, target, at, observed = true)
+            if (flow != null) launches[fact.target.token] = flow
+            else { policy.unknown(at); ready = false }
         }
-        val decision = policy.entry(0, target, at, source?.let { facts?.apps?.get(it.packageName) })
-        val existing = source?.let { s -> facts?.apps?.get(s.packageName)?.let { policy.flowForCall(it, target) } }
-        if (existing != null) {
-            launches[fact.target.token] = existing
-            return EntryDecision(true, "existing_operation")
-        }
-        if (source != null && (fact.observed || source.packageName != target.packageName && source.visible)) {
-            // Source visibility is not user authorization. Observe the unresolved call and hold
-            // only its actual Activity/binding chain, without activating a card.
-            val flow = policy.beginFlow(source.packageName, source.token, target, at, observed = true)
-            if (flow != null) {
-                launches[fact.target.token] = flow
-                logLimited(target.packageName, "observe", "activity_origin_unconfirmed")
-                return EntryDecision(true, "observed_activity_chain")
-            }
-            policy.unknown(at)
-            ready = false
-            return EntryDecision(true, "operation_capacity_unknown")
-        }
-        if (decision.allow && !decision.wouldBlock) return decision
-        recordDecision(target, decision)
-        return if (enforcing()) decision else EntryDecision(true, "initializing_or_observe", decision.wouldBlock)
+        // Android's permission and BAL checks are authoritative. No module Activity veto.
+        return EntryDecision(true, "android_activity")
     }
 
     override fun launched(fact: LaunchFact, success: Boolean, originalToken: String?) {
         if (defer(fact.target.packageName, fact.target.uid) { launched(fact, success, originalToken) }) return
         val flow = launches.remove(originalToken ?: fact.target.token)
         if (success) {
-            if (fact.evidence != null) policy.opened(fact.target.packageName, fact.target.task, fact.evidence, now())
+            policy.opened(fact.target.packageName, fact.target.task, fact.evidence ?: OpenSource.ACTIVITY, now())
             if (flow != null) {
                 activeActivities.computeIfAbsent(fact.target.token) { ConcurrentHashMap.newKeySet() }.add(flow)
                 policy.flowActivity(flow, fact.target.token, true, now())
@@ -406,7 +377,7 @@ object ModuleRuntime : FrameworkCallbacks {
     override fun taskClosed(fact: TaskCloseFact) {
         if (fact.task.userId != 0) return
         if (defer(fact.owner) { taskClosed(fact) }) return
-        policy.removed(fact.task, fact.owner, adapter.recentsCaller(fact.uid, fact.pid), now())
+        policy.removed(fact.task, fact.owner, true, now())
         wake()
     }
 
@@ -421,7 +392,8 @@ object ModuleRuntime : FrameworkCallbacks {
     }
 
     override fun entry(userId: Int, target: CallTarget, sourceUid: Int, sourcePackage: String?, evidence: OpenSource?, observed: Boolean, systemEntry: SystemEntry?): EntryDecision {
-        val caller = sourcePackage?.let { facts?.apps?.get(it) }?.takeIf { it.uid == sourceUid }
+        val callerPackage = sourcePackage ?: facts?.groups?.get(sourceUid)?.singleOrNull()
+        val caller = callerPackage?.let { facts?.apps?.get(it) }?.takeIf { it.uid == sourceUid && it.userId == 0 }
         // Track native bindings even while paused, so resume retains live system callbacks.
         val platformCaller = caller?.packageName == "android" && caller.uid == 1000
         val binding = systemEntry == SystemEntry.BINDING && ready && factsFresh &&
@@ -443,15 +415,24 @@ object ModuleRuntime : FrameworkCallbacks {
         if (!ready || !factsFresh || paused) return EntryDecision(true, "initializing_or_paused")
         var result = policy.entry(userId, target, now(), caller)
         if (userId == 0 && result.reason != "essential" && caller != null && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
-            val flow = policy.flowFor(caller.packageName)
-            if (flow != null) policy.dependency(flow, caller.packageName, target, now())
             val systemDependency = caller.packageName == target.packageName && policy.systemBound(caller) &&
                 target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER)
-            if (policy.flowForCall(caller, target) == null && (evidence != null || observed || systemDependency || policy.isVisible(caller.packageName))) {
-                policy.beginFlow(caller.packageName, null, target, now(), observed = evidence == null,
-                    systemDependency = systemDependency && evidence == null)
+            val flow = policy.flowFor(caller.packageName)
+            if ((policy.hasSession(caller) || systemDependency || observed) &&
+                    (caller.packageName != target.packageName || flow != null || systemDependency)) {
+                if (flow == null || !policy.extendFlow(flow, caller.packageName, target, now())) {
+                    if (policy.beginFlow(caller.packageName, null, target, now(), observed = true,
+                            systemDependency = systemDependency) == null) {
+                        policy.unknown(now()); ready = false; wake()
+                        return EntryDecision(true, "operation_tracking_unknown")
+                    }
+                }
             }
             result = policy.entry(userId, target, now(), caller)
+        }
+        if (result.allow && result.reason == "caller_unknown_or_system" && policy.isRestricted(target.packageName)) {
+            policy.reviewLater(target.packageName, now())
+            wake()
         }
         recordDecision(target, result)
         // A notification from the target itself proves running state. A proxy notification does
@@ -508,8 +489,12 @@ object ModuleRuntime : FrameworkCallbacks {
     override fun processStarted(packageName: String, uid: Int) {
         if (uid / 100000 != 0) return
         val review = ready
-        if (defer(packageName, uid) { if (review) policy.runningWithoutPermission(packageName, now()); wake() }) return
-        if (review) policy.runningWithoutPermission(packageName, now())
+        fun observedStart() {
+            if (policy.isRestricted(packageName)) policy.reviewLater(packageName, now())
+            policy.runningWithoutPermission(packageName, now())
+        }
+        if (defer(packageName, uid) { if (review) observedStart(); wake() }) return
+        if (review) observedStart()
         wake()
     }
 
@@ -704,6 +689,6 @@ object ModuleRuntime : FrameworkCallbacks {
     private fun rootCause(error: Throwable): Throwable = error.cause?.let { rootCause(it) } ?: error
     private fun now() = SystemClock.elapsedRealtime()
     private const val SELF = "io.github.user4ooksk.stopcard"
-    private val CORE = setOf("task_add", "task_remove", "force_stop")
+    private val CORE = setOf("task_add", "task_remove", "user_task_close", "activity", "window_true", "force_stop")
     private val WAKE = setOf("activity", "service_lookup", "broadcast", "provider", "job", "alarm", "pending_intent", "process")
 }

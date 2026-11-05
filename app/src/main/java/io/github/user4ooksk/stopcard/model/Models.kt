@@ -56,6 +56,7 @@ enum class StopReason(val code: String) {
 
     FLOW_FINISHED("flow_finished"),
     UNLICENSED_RUNNING("unlicensed_running"),
+    CLOSED_APP_RESTARTED("closed_app_restarted"),
 
     /** Observe mode: the module would have stopped it. */
     OBSERVE("observe"),
@@ -81,7 +82,7 @@ enum class StopReason(val code: String) {
 val StopReason.isStop: Boolean
     get() = when (this) {
         StopReason.CARD_REMOVED, StopReason.LAST_VISIBLE, StopReason.MANUAL,
-        StopReason.FLOW_FINISHED, StopReason.UNLICENSED_RUNNING -> true
+        StopReason.FLOW_FINISHED, StopReason.UNLICENSED_RUNNING, StopReason.CLOSED_APP_RESTARTED -> true
         else -> false
     }
 

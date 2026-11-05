@@ -89,7 +89,7 @@ interface EventDao {
 
     @Query(
         "SELECT packageName, COUNT(*) AS count, MAX(time) AS lastTime FROM events " +
-            "WHERE time >= :since AND reason IN ('card_removed','last_visible','manual','flow_finished','unlicensed_running') " +
+            "WHERE time >= :since AND reason IN ('card_removed','last_visible','manual','flow_finished','unlicensed_running','closed_app_restarted') " +
             "GROUP BY packageName"
     )
     fun observeCounts(since: Long): Flow<List<PackageCount>>

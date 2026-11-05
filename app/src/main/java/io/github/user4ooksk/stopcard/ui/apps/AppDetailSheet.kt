@@ -130,7 +130,7 @@ fun AppDetailSheet(
                 Spacer(Modifier.height(12.dp))
                 Text(
                     if (item.managed) {
-                        "无卡片且无其他保护时停止应用。"
+                        "划掉最后一张卡片后，无其他保护时停止应用。"
                     } else {
                         "不受卡片规则限制。"
                     },

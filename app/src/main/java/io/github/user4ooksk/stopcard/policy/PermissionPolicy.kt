@@ -3,7 +3,7 @@ package io.github.user4ooksk.stopcard.policy
 import java.util.concurrent.atomic.AtomicLong
 
 /** Facts have framework provenance. Intent extras never create an [OpenSource]. */
-enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION, USER_INTERACTION }
+enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION, ACTIVITY }
 enum class EntryKind { ACTIVITY, SERVICE, BIND, BROADCAST, PROVIDER, JOB, ALARM, PENDING_INTENT, PROCESS, NOTIFICATION }
 
 data class AppKey(
@@ -72,6 +72,7 @@ class PermissionPolicy {
         var candidates = emptySet<TaskKey>()
         var visible = false
         var closing = false
+        var restricted = false
         var reason = ""
         var due: Long? = null
         var stopped = false
@@ -106,6 +107,7 @@ class PermissionPolicy {
         val states: Map<String, PermissionView> = emptyMap(),
         val grants: Map<String, Set<Grant>> = emptyMap(),
         val versions: Map<String, Long> = emptyMap(),
+        val restricted: Set<String> = emptySet(),
     )
 
     private val tracks = LinkedHashMap<String, Track>()
@@ -134,8 +136,6 @@ class PermissionPolicy {
                     flows.remove(flow.id)
                     for (related in flowPackages(flow) - pkg) tracks[related]?.let { t ->
                         invalidate(related)
-                        t.closing = true
-                        t.reason = "flow_finished"
                         t.due = null
                     }
                 }
@@ -149,15 +149,11 @@ class PermissionPolicy {
 
     @Synchronized fun configure(next: AccessRule, now: Long) {
         if (next == rule) return
-        val revoked = rule.exceptions - next.exceptions
-        val revokedRoles = rule.essential.keys - next.essential.keys
         rule = next
         for ((pkg, t) in tracks) {
             invalidate(pkg)
             t.due = null
             t.observation = null
-            if (t.app in revoked) { t.closing = true; t.reason = "exception_revoked" }
-            if (pkg in revokedRoles && t.running) { t.closing = true; t.reason = "role_revoked" }
         }
         publish(now)
     }
@@ -188,21 +184,39 @@ class PermissionPolicy {
      * work even if the new Activity opens and hides between two reconciliation snapshots.
      */
     @Synchronized fun opened(pkg: String, task: TaskKey?, source: OpenSource, now: Long) {
-        // Cross-app input confirms an operation; only direct open sources activate cards.
-        if (source == OpenSource.USER_INTERACTION) return
         val t = track(pkg) ?: return
         invalidate(pkg)
         t.stopped = false
         t.closing = false
+        t.restricted = false
         t.due = null
         t.observation = null
-        t.openedUntil = now + OPEN_CONFIRM_MS
+        t.openedUntil = maxOf(t.openedUntil, now + OPEN_CONFIRM_MS)
         if (task != null && task.userId == 0 && (boot == null || task.boot == boot)) {
             t.activated += task
             t.uncertainTasks -= task
         }
         // The source is an enum produced by the adapter, never an application-provided string.
         t.reason = "opened_${source.name.lowercase()}"
+        publish(now)
+    }
+
+    /** Android owns Activity admission. Cancel an old stop before its process can start. */
+    @Synchronized fun starting(pkg: String, now: Long) {
+        val t = track(pkg) ?: return
+        invalidate(pkg)
+        t.due = null
+        t.openedUntil = now + rule.hiddenReviewMs
+        t.reason = "opening_activity"
+        publish(now)
+    }
+
+    /** Missing caller facts never justify an immediate stop of a potentially legitimate start. */
+    @Synchronized fun reviewLater(pkg: String, now: Long) {
+        val t = track(pkg) ?: return
+        invalidate(pkg)
+        t.due = null
+        t.openedUntil = now + rule.hiddenReviewMs
         publish(now)
     }
 
@@ -217,31 +231,31 @@ class PermissionPolicy {
             invalidate(pkg)
             t.visible = true
             t.stopped = false
+            t.restricted = false
+            t.closing = false
             t.due = null
             // A document displayed during an active session continues that session. Hidden
             // sibling tasks do not inherit it; reconciliation still verifies task ownership.
-            if (task != null && (t.activated.isNotEmpty() || t.openedUntil > now)) t.activated += task
+            if (task != null) t.activated += task
         } else if (t.visible) {
             invalidate(pkg)
             t.visible = false
-            t.closing = true
-            t.reason = "last_visible"
         }
         publish(now)
     }
 
-    /** Retain close events during initialization. Only a trusted caller marks [userClosed]. */
+    /** Retain close events during initialization. Only a verified native removal marks [userClosed]. */
     @Synchronized fun removed(task: TaskKey, owner: String?, userClosed: Boolean, now: Long) {
         val pkg = owner ?: taskOwners[task] ?: return
         val t = track(pkg) ?: return
-        val active = t.activated.remove(task)
+        t.activated.remove(task)
         t.cards = t.cards - task
         t.candidates = t.candidates - task
         t.uncertainTasks -= task
-        if (active || userClosed) {
+        if (userClosed) {
             invalidate(pkg)
             t.closing = true
-            t.reason = if (userClosed) "user_closed" else "card_removed"
+            t.reason = "user_closed"
             t.due = null
         }
         publish(now)
@@ -261,6 +275,7 @@ class PermissionPolicy {
                 t.cards = emptySet()
                 t.candidates = emptySet()
                 t.closing = false
+                t.restricted = false
                 t.due = null
                 t.openedUntil = 0
                 t.uncertainTasks.clear()
@@ -287,13 +302,10 @@ class PermissionPolicy {
             val onScreen = pkg in world.visiblePackages || world.tasks.any { it.key.userId == 0 && pkg in it.visiblePackages }
             if (onScreen != t.visible) {
                 invalidate(pkg)
-                if (t.visible && !onScreen) {
-                    t.closing = true
-                    t.reason = "last_visible"
-                }
+                if (onScreen) { t.restricted = false; t.closing = false }
             }
             t.visible = onScreen
-            if (t.activated.isNotEmpty() || t.openedUntil > now) {
+            if (onScreen) {
                 // Continue a verified session only through tasks actually displayed by its owner.
                 // This also covers a visible document when the window callback is unavailable.
                 t.activated += owned.filter { pkg in it.visiblePackages }.map { it.key }
@@ -308,11 +320,7 @@ class PermissionPolicy {
                 t.openedUntil = 0
             }
             t.candidates = eligible
-            if (wasCards.isNotEmpty() && t.cards.isEmpty()) {
-                invalidate(pkg)
-                t.closing = true
-                t.reason = "card_removed"
-            }
+            if (wasCards != t.cards) invalidate(pkg)
             if (t.cards.isNotEmpty() || onScreen) {
                 t.due = null
                 t.stopped = false
@@ -325,7 +333,7 @@ class PermissionPolicy {
         publish(now)
     }
 
-    /** Exact component grants. Unconfirmed visible calls remain observed within their own flow. */
+    /** Components describe lifecycle tracking; application sessions authorize dependencies. */
     @Synchronized fun beginFlow(
         source: String,
         sourceActivity: String?,
@@ -343,6 +351,18 @@ class PermissionPolicy {
             flows.values.firstOrNull { it.systemBinding && it.source == source && it.grants.any { g -> g.target == target } }
                 ?.let { return it.id }
         }
+        if (!systemBinding) flows.values.firstOrNull { !it.systemBinding && it.source == source &&
+                it.grants.any { g -> g.target.packageName == target.packageName } }?.let { existing ->
+            if (existing.grants.size >= MAX_FLOW_TARGETS && existing.grants.none { it.target == target }) {
+                unknown(now)
+                return null
+            }
+            existing.grants += Grant(apps[source] ?: return null, target, observed)
+            existing.reviewAt = now + rule.hiddenReviewMs
+            invalidate(target.packageName)
+            publish(now)
+            return existing.id
+        }
         if (track(source) == null || track(target.packageName) == null || flows.size >= MAX_FLOWS) return null
         val id = serial.incrementAndGet()
         val f = Flow(id, source, sourceActivity, now + rule.hiddenReviewMs, observed, systemBinding,
@@ -355,10 +375,10 @@ class PermissionPolicy {
         return id
     }
 
-    /** Extension needs both an existing flow and fresh input for a new target. */
-    @Synchronized fun extendFlow(id: Long, from: String, target: CallTarget, hasInput: Boolean, now: Long): Boolean {
+    /** Native accepted calls from a live session can extend that session without touch proofs. */
+    @Synchronized fun extendFlow(id: Long, from: String, target: CallTarget, now: Long): Boolean {
         val f = flows[id] ?: return false
-        if (f.systemBinding || f.observed || !hasInput || !contains(f, from) || f.grants.size >= MAX_FLOW_TARGETS || track(target.packageName) == null) return false
+        if (f.systemBinding || !contains(f, from) || f.grants.size >= MAX_FLOW_TARGETS || track(target.packageName) == null) return false
         f.grants += Grant(apps.getValue(from), target, false)
         f.reviewAt = now + rule.hiddenReviewMs
         invalidate(target.packageName)
@@ -369,7 +389,7 @@ class PermissionPolicy {
     /** Dependencies may only address an existing participant and an exact resolved component. */
     @Synchronized fun dependency(id: Long, from: String, target: CallTarget, now: Long): Boolean {
         val f = flows[id] ?: return false
-        if (f.systemBinding || f.observed || !contains(f, from) || !contains(f, target.packageName) || target.component.isNullOrBlank() ||
+        if (f.systemBinding || !contains(f, from) || !contains(f, target.packageName) || target.component.isNullOrBlank() ||
             target.kind !in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST) ||
             f.grants.size >= MAX_FLOW_TARGETS) return false
         f.grants += Grant(apps.getValue(from), target, false)
@@ -437,18 +457,16 @@ class PermissionPolicy {
         val finished = flows.values.filter { f ->
             val visible = f.grants.any { tracks[it.target.packageName]?.visible == true }
             if (visible) f.reviewAt = now + rule.hiddenReviewMs
-            // A verified system binding lives until native unbind/destruction, even when
-            // its target has no Activity. Ordinary app flows retain the hidden timeout.
-            val systemWork = f.systemBinding && (f.bindings.isNotEmpty() || f.activities.isNotEmpty())
-            !visible && ((now >= (f.expiresAt ?: f.reviewAt) && !systemWork) || (!f.trackingUnknown && f.finished &&
+            // A real connection/component outlives a timer. Missing lifecycle facts defer a
+            // close; the timeout only retires an idle operation without live work.
+            val liveWork = f.bindings.isNotEmpty() || f.activities.isNotEmpty() || f.trackingUnknown
+            !visible && ((now >= (f.expiresAt ?: f.reviewAt) && !liveWork) || (!f.trackingUnknown && f.finished &&
                 f.bindings.isEmpty() && f.activities.isEmpty()))
         }
         for (f in finished) {
             flows.remove(f.id)
             for (pkg in flowPackages(f)) tracks[pkg]?.let { t ->
                 invalidate(pkg)
-                t.closing = true
-                t.reason = "flow_finished"
                 t.due = null
             }
         }
@@ -459,9 +477,9 @@ class PermissionPolicy {
         val t = track(pkg) ?: return
         t.running = true
         t.stopped = false
-        if (!ready || permitted(t, now)) { publish(now); return }
+        if (!t.restricted) { publish(now); return }
         t.closing = true
-        t.reason = "unlicensed_running"
+        t.reason = "closed_app_restarted"
         publish(now)
     }
 
@@ -471,8 +489,9 @@ class PermissionPolicy {
         for ((pkg, t) in tracks) {
             val started = !t.running && pkg in packages
             t.running = pkg in packages
-            if (!baseline && started && ready && !permitted(t, now)) {
-                t.closing = true; t.reason = "unlicensed_running"; t.due = null
+            if (started) t.stopped = false
+            if (!baseline && started && t.restricted) {
+                t.closing = true; t.reason = "closed_app_restarted"; t.due = null
             }
         }
         publish(now)
@@ -507,7 +526,8 @@ class PermissionPolicy {
             (v.state == "pending" || (ticket.reason == "manual" && !v.visible && v.flows == 0 && v.state in setOf("card", "managed", "stopped"))) &&
             group.all { pkg -> pkg == ticket.app.packageName || p.apps[pkg]?.let { app ->
                 app.uid == ticket.app.uid && pkg !in p.rule.essential && app !in p.rule.exceptions &&
-                    (p.states[pkg]?.state ?: "managed") in setOf("managed", "pending", "stopped")
+                    (p.states[pkg]?.state ?: "managed") in setOf("managed", "pending", "stopped") &&
+                    p.states[pkg]?.let { !it.running || it.state != "managed" } != false
             } == true }
     }
 
@@ -528,6 +548,7 @@ class PermissionPolicy {
             t.due = null
         } else if (success) {
             t.stopped = true
+            t.restricted = true
             t.running = false
             t.closing = false
             t.due = null
@@ -545,29 +566,21 @@ class PermissionPolicy {
     fun entry(userId: Int, target: CallTarget, now: Long, caller: AppKey? = null): EntryDecision {
         val p = published
         if (userId != 0) return EntryDecision(true, "other_user")
+        if (target.kind == EntryKind.ACTIVITY) return EntryDecision(true, "android_activity")
         if (!p.ready || p.paused || !p.rule.enabled) return EntryDecision(true, "unknown_or_paused")
         val app = p.apps[target.packageName] ?: return EntryDecision(true, "unknown_identity")
         if (target.packageName in p.rule.essential) return EntryDecision(true, "essential")
         if (app in p.rule.exceptions) return EntryDecision(true, "exception")
-        val v = p.states[target.packageName]
-            ?: return EntryDecision(p.rule.observe, if (p.rule.observe) "observe_no_permission" else "no_permission", true)
+        val v = p.states[target.packageName] ?: return EntryDecision(true, "not_closed")
         if (v.state in setOf("essential", "exception", "visible", "card")) return EntryDecision(true, v.state)
         if (v.state == "opening") return EntryDecision(true, "open_confirm")
         if (v.state == "uncertain") return EntryDecision(true, "task_provenance_unknown", true)
-        val grants = p.grants[target.packageName].orEmpty()
-        val grant = grants.firstOrNull { g ->
-            g.caller == caller && p.apps[g.caller.packageName] == caller && g.target.kind == target.kind &&
-                !g.target.component.isNullOrBlank() && g.target.component == target.component
-        }
-        if (grant != null) {
-            return EntryDecision(true, if (grant.observed) "observed_operation" else "operation", grant.observed)
-        }
-        // Notifications belong to the target, including a known proxy target. An operation may
-        // post a notification, but it does not grant unrelated starts to all flow participants.
-        if (target.kind == EntryKind.NOTIFICATION && v.flows > 0) return EntryDecision(true, "operation_notification")
-        if (target.kind == EntryKind.PROCESS && !target.component.isNullOrBlank() &&
-            grants.any { it.target.component == target.component }) return EntryDecision(true, "operation_process")
-        return EntryDecision(p.rule.observe, if (p.rule.observe) "observe_no_permission" else "no_permission", true)
+        if (v.flows > 0) return EntryDecision(true, "operation")
+        if (target.packageName !in p.restricted) return EntryDecision(true, "not_closed")
+        if (caller == null || p.apps[caller.packageName] != caller || caller.uid < 10000)
+            return EntryDecision(true, "caller_unknown_or_system")
+        if (hasSession(caller)) return EntryDecision(true, "active_caller")
+        return EntryDecision(p.rule.observe, if (p.rule.observe) "observe_closed_background" else "closed_background", true)
     }
 
     fun views(): List<PermissionView> = published.states.values.toList()
@@ -592,6 +605,9 @@ class PermissionPolicy {
     }
 
     fun isVisible(pkg: String): Boolean = published.states[pkg]?.visible == true
+    fun hasSession(app: AppKey): Boolean = published.apps[app.packageName] == app &&
+        published.states[app.packageName]?.let { it.visible || it.cards > 0 || it.flows > 0 || it.state == "opening" } == true
+    fun isRestricted(pkg: String): Boolean = pkg in published.restricted
     fun flowDetails(): List<String> = synchronized(this) {
         flows.values.map { f ->
             val stage = if (f.trackingUnknown) "needs_review" else if (f.observed) "observed" else "active"
@@ -637,7 +653,8 @@ class PermissionPolicy {
             }
             PermissionView(t.app, t.cards.size, t.visible, activeFlows, state, reasons, t.due, t.running)
         }
-        published = Published(rule, ready, paused, apps, states, grants, revisions.toMap())
+        published = Published(rule, ready, paused, apps, states, grants, revisions.toMap(),
+            tracks.filterValues { it.restricted }.keys.toSet())
     }
 
     companion object {

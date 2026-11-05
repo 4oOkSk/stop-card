@@ -80,7 +80,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                 item { SectionHeader("保护") }
                 item {
                     GroupCard {
-                        SettingSwitch("卡片规则", "无卡片且无其他保护时停止应用。", current.protectionEnabled, viewModel::setProtectionEnabled)
+                        SettingSwitch("卡片规则", "划掉最后一张卡片后，无其他保护时停止应用。", current.protectionEnabled, viewModel::setProtectionEnabled)
                         GroupDivider()
                         SettingSwitch("观察模式", "仅记录，不拦截或停止应用。", current.observeOnly, viewModel::setObserveOnly)
                         GroupDivider()

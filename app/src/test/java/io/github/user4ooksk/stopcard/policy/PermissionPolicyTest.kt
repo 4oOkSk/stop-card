@@ -4,329 +4,173 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PermissionPolicyTest {
-    private val a = AppKey(0, "shop.app", 10001, 1, "signer-a")
-    private val b = AppKey(0, "pay.app", 10002, 2, "signer-b")
-    private val c = AppKey(0, "bank.app", 10003, 3, "signer-c")
+    private val a = AppKey(0, "shop.app", 10001, 1, "a")
+    private val b = AppKey(0, "pay.app", 10002, 2, "b")
+    private val c = AppKey(0, "bank.app", 10003, 3, "c")
     private val t1 = TaskKey(0, 1, "boot")
     private val t2 = TaskKey(0, 2, "boot")
     private val rule = AccessRule(enabled = true, observe = false, generation = 1)
-
-    private fun policy(): PermissionPolicy = PermissionPolicy().apply {
-        setApps(listOf(a, b, c), 0)
-        configure(rule, 0)
-        pause(false, 0)
-        reconcile(world(), 1)
+    private fun policy() = PermissionPolicy().apply {
+        setApps(listOf(a, b, c), 0); configure(rule, 0); pause(false, 0); reconcile(world(), 1)
     }
-
     private fun task(key: TaskKey = t1, pkg: String = a.packageName, visible: Boolean = false, eligible: Boolean = true) =
         TaskFact(key, pkg, setOf(pkg), if (visible) setOf(pkg) else emptySet(), eligible)
-
     private fun world(vararg tasks: TaskFact, complete: Boolean = true, boot: String = "boot", visible: Set<String> = emptySet()) =
         WorldSnapshot(tasks.toList(), visible, complete, boot)
-
-    private fun opened(p: PermissionPolicy, key: TaskKey = t1, pkg: String = a.packageName, now: Long = 100) {
-        p.opened(pkg, key, OpenSource.LAUNCHER, now)
-        p.reconcile(world(task(key, pkg, true)), now)
-        p.reconcile(world(task(key, pkg)), now + 1)
+    private fun target(app: AppKey = a, kind: EntryKind = EntryKind.SERVICE, name: String = "Component") =
+        CallTarget(app.packageName, "${app.packageName}/$name", kind)
+    private fun opened(p: PermissionPolicy) {
+        p.opened(a.packageName, t1, OpenSource.ACTIVITY, 100)
+        p.reconcile(world(task(visible = true)), 100)
+        p.reconcile(world(task()), 101)
+    }
+    private fun closing(p: PermissionPolicy): StopTicket {
+        p.removed(t1, a.packageName, true, 200); p.reconcile(world(), 201)
+        assertTrue(p.stops(201).isEmpty())
+        return p.stops(701).single()
+    }
+    private fun stopped(p: PermissionPolicy, app: AppKey = a, at: Long = 10) {
+        val ticket = p.manual(app.packageName)!!
+        assertTrue(p.valid(ticket))
+        p.completed(ticket, true, false, at)
     }
 
-    private fun closing(p: PermissionPolicy, now: Long = 200): StopTicket {
-        p.removed(t1, a.packageName, true, now)
-        p.reconcile(world(), now)
-        assertTrue(p.stops(now).isEmpty())
-        return p.stops(now + 500).single()
-    }
-
-    @Test fun `a newly selected integration cancels an older stop without permitting other apps`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.configure(rule.copy(essential = mapOf(a.packageName to setOf("app_widget"))), 701)
-        assertFalse(p.valid(ticket))
-        assertTrue(p.entry(0, CallTarget(a.packageName, "shop/Widget", EntryKind.BROADCAST), 702).allow)
-        assertNull(p.manual(a.packageName))
-        assertFalse(p.entry(0, CallTarget(c.packageName, "bank/Background", EntryKind.SERVICE), 702).allow)
-        assertTrue(p.stops(4_000).isEmpty())
-    }
-
-    @Test fun `removing a widget waits for an active native VPN binding to finish`() {
+    @Test fun freshInventoryAndNewProcessesAreNotPermissionViolations() {
         val p = policy()
-        val system = AppKey(0, "android", 1000, 1, "platform")
-        p.setApps(listOf(a, b, c, system), 2)
-        val platform = rule.copy(essential = mapOf(system.packageName to setOf("system_package")))
-        p.configure(platform.copy(essential = platform.essential + (b.packageName to setOf("app_widget"))), 3)
-        p.running(setOf(b.packageName), 4, baseline = false)
-        val service = CallTarget(b.packageName, "pay/Vpn", EntryKind.BIND)
-        val flow = p.beginFlow(system.packageName, null, service, 5, systemBinding = true)!!
-        assertTrue(p.bind(flow, "native-binding", service, 6, system))
-        p.flowActivity(flow, "native-service", true, 7)
-        p.finishFlow(flow, 8)
-        p.configure(platform, 9)
-        p.reconcile(world(), 40_000)
-        assertTrue(p.stops(40_000).isEmpty())
-        assertTrue(p.entry(0, service, 40_001, system).allow)
-        assertFalse(p.entry(0, service.copy(kind = EntryKind.SERVICE), 40_001, system).allow)
-        p.unbind("native-binding", 40_002)
-        assertTrue(p.stops(40_003).isEmpty())
-        p.flowActivity(flow, "native-service", false, 40_004)
-        p.reconcile(world(), 40_005)
-        assertTrue(p.stops(40_005).isEmpty())
-        assertEquals(listOf(b), p.stops(40_505).map { it.app })
-    }
-
-    @Test fun `system integration dependencies require a real binding and stay within the same installation`() {
-        val p = policy()
-        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
-        p.beginFlow(a.packageName, null, tile, 2, systemBinding = true)!!
-        val service = CallTarget(b.packageName, "pay/Toggle", EntryKind.SERVICE)
-        assertFalse(p.systemBound(b))
-        assertNull(p.beginFlow(b.packageName, null, service, 3, observed = true, systemDependency = true))
-        val flow = p.flowForCall(a, tile)!!
-        assertTrue(p.bind(flow, "tile-binding", tile, 4, a))
-        assertTrue(p.systemBound(b))
-        assertFalse(p.systemBound(b.copy(installedAt = 99)))
-        assertNull(p.beginFlow(b.packageName, null, service.copy(packageName = c.packageName), 5, observed = true, systemDependency = true))
-        assertNull(p.beginFlow(b.packageName, null, service.copy(kind = EntryKind.ACTIVITY), 5, observed = true, systemDependency = true))
-        assertNotNull(p.beginFlow(b.packageName, null, service, 6, observed = true, systemDependency = true))
-        assertEquals("observed_operation", p.entry(0, service, 7, b).reason)
-        assertFalse(p.entry(0, service.copy(component = "pay/Unrelated"), 7, b).allow)
-        assertFalse(p.entry(0, service, 7, c).allow)
-    }
-
-    @Test fun `repeated dependency callbacks cannot renew permission after a system binding ends`() {
-        val p = policy()
-        p.configure(rule.copy(essential = mapOf(a.packageName to setOf("system_package"))), 2)
-        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
-        val native = p.beginFlow(a.packageName, null, tile, 2, systemBinding = true)!!
-        assertTrue(p.bind(native, "tile-binding", tile, 3, a))
-        p.finishFlow(native, 4)
-        val service = CallTarget(b.packageName, "pay/Toggle", EntryKind.SERVICE)
-        val child = p.beginFlow(b.packageName, null, service, 10, observed = true, systemDependency = true)!!
-        p.flowActivity(child, "toggle-service", true, 11)
-        p.unbind("tile-binding", 12)
-        assertFalse(p.systemBound(b))
-        p.flowActivity(child, "toggle-service", true, 29_000)
-        p.reconcile(world(), 30_009)
-        assertTrue(p.entry(0, service, 30_009, b).allow)
-        assertTrue(p.stops(30_009).isEmpty())
-        p.reconcile(world(), 30_010)
-        assertFalse(p.entry(0, service, 30_010, b).allow)
-        assertTrue(p.stops(30_010).isEmpty())
-        assertEquals(listOf(b), p.stops(30_510).map { it.app })
-        assertNull(p.beginFlow(b.packageName, null, service, 30_511, observed = true, systemDependency = true))
-    }
-
-    @Test fun `no initialization sweep or historical card permission`() {
-        val p = PermissionPolicy().apply {
-            setApps(listOf(a, b, c), 0); configure(rule, 0); pause(false, 0)
-            reconcile(world(task()), 100)
-        }
-        assertTrue(p.stops(4000).isEmpty())
-        assertFalse(p.entry(0, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 4000).allow)
-    }
-
-    @Test fun `idle inventory remains managed without inventing running state`() {
-        val p = policy()
-        val plugin = c.copy(packageName = "plugin.without.launcher")
-        p.setApps(listOf(a, b, plugin), 10)
-        assertTrue(p.views().isEmpty())
+        for (kind in EntryKind.entries) assertTrue(p.entry(0, target(kind = kind), 2, b).allow)
+        p.running(setOf(a.packageName), 3, baseline = true)
+        p.running(setOf(a.packageName, b.packageName), 4, baseline = false)
+        p.runningWithoutPermission(c.packageName, 5)
         assertTrue(p.stops(100_000).isEmpty())
-        assertFalse(p.entry(0, CallTarget(plugin.packageName, "plugin/Service", EntryKind.BIND), 100_000).allow)
-        p.configure(rule.copy(exceptions = setOf(plugin)), 100_001)
-        assertTrue(p.entry(0, CallTarget(plugin.packageName, kind = EntryKind.PROCESS), 100_001).allow)
+        assertTrue(p.views().all { it.running })
     }
 
-    @Test fun `reinstall cancels old operation identity and reviews only its remaining participants`() {
-        val p = policy()
-        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100)
-        p.reconcile(world(), 4_000)
-        val replacement = a.copy(installedAt = 99, uid = 10099)
-        p.setApps(listOf(replacement, b, c), 4_001)
-        assertNull(p.flowFor(b.packageName))
-        assertTrue(p.stops(4_001).isEmpty())
-        val tickets = p.stops(4_501)
-        assertEquals(listOf(b), tickets.map { it.app })
-        assertFalse(p.entry(0, CallTarget(replacement.packageName, kind = EntryKind.NOTIFICATION), 4_501).allow)
+    @Test fun installerOpenAndAllOtherActivitiesBelongToAndroidEvenAfterAStop() {
+        val p = policy(); stopped(p)
+        for (caller in listOf(null, b, a)) assertTrue(p.entry(0, target(kind = EntryKind.ACTIVITY), 11, caller).allow)
+        assertTrue(p.isRestricted(a.packageName)) // Admission alone does not pretend a page started.
+        p.starting(a.packageName, 12)
+        assertTrue(p.entry(0, target(kind = EntryKind.PROVIDER), 13, b).allow)
+        p.opened(a.packageName, null, OpenSource.ACTIVITY, 14)
+        assertFalse(p.isRestricted(a.packageName))
     }
 
-    @Test fun `last card closes after short review and success is explicit`() {
+    @Test fun onlySuccessfulStopRestrictsKnownBackgroundCallers() {
         val p = policy(); opened(p)
         val ticket = closing(p)
-        assertTrue(p.valid(ticket))
-        assertNotEquals("stopped", p.views().first { it.app == a }.state)
-        p.completed(ticket, success = true, observed = false, now = 701)
-        assertEquals("stopped", p.views().first { it.app == a }.state)
-    }
-
-    @Test fun `manual stop revokes a retained thumbnail until a new verified open`() {
-        val p = policy(); opened(p)
-        val ticket = p.manual(a.packageName)!!
-        assertTrue(p.valid(ticket))
-        p.completed(ticket, success = true, observed = false, now = 200)
-        p.reconcile(world(task()), 201)
-        assertEquals("stopped", p.views().single().state)
-        assertFalse(p.entry(0, CallTarget(a.packageName, kind = EntryKind.PROCESS), 202).allow)
-        assertFalse(p.entry(0, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 202).allow)
-        p.opened(a.packageName, t1, OpenSource.RECENTS, 203)
-        p.reconcile(world(task()), 204)
-        assertEquals("card", p.views().single().state)
-    }
-
-    @Test fun `open between polls invalidates stop before task reconciliation`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.opened(a.packageName, t2, OpenSource.RECENTS, 701)
-        assertFalse(p.valid(ticket))
-        p.reconcile(world(task(t2)), 702)
-        assertEquals(1, p.views().first { it.app == a }.cards)
-        assertTrue(p.stops(5000).isEmpty())
-    }
-
-    @Test fun `another package opening in a shared UID cancels native stop permission`() {
-        val sibling = b.copy(uid = a.uid)
-        val p = policy()
-        p.setApps(listOf(a, sibling, c), 2)
-        opened(p)
-        val ticket = closing(p)
-        val group = setOf(a.packageName, sibling.packageName)
-        assertTrue(p.valid(ticket, group))
-        p.opened(sibling.packageName, t2, OpenSource.LAUNCHER, 701)
-        assertTrue("target revision did not change", p.valid(ticket))
-        assertFalse("the shared process now has a new user session", p.valid(ticket, group))
-    }
-
-    @Test fun `a new operation in a shared UID also protects the whole process`() {
-        val sibling = b.copy(uid = a.uid)
-        val p = policy()
-        p.setApps(listOf(a, sibling, c), 2)
-        opened(p)
-        val ticket = closing(p)
-        p.beginFlow(c.packageName, "source", CallTarget(sibling.packageName, "pay.app/Pay", EntryKind.ACTIVITY), 701, observed = true)
-        assertFalse(p.valid(ticket, setOf(a.packageName, sibling.packageName)))
-        assertFalse("a group member with unknown identity is not safe", p.valid(ticket, setOf(a.packageName, "unknown.app")))
-    }
-
-    @Test fun `cached priority applies only to a completely permitted group and stops on pause`() {
-        val p = policy(); opened(p)
-        val group = setOf(a.packageName, b.packageName)
-        assertFalse(p.keepAlive(group))
-        p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 200)
-        assertTrue(p.keepAlive(group))
-        p.pause(true, 201)
-        assertFalse(p.keepAlive(group))
-    }
-
-    @Test fun `unseen task in final read cancels old decision without activating it`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.reconcile(world(task(t2)), 701)
-        assertFalse(p.valid(ticket))
-        assertEquals(0, p.views().first { it.app == a }.cards)
-        assertTrue(p.stops(702).isEmpty())
-    }
-
-    @Test fun `two tasks opened between snapshots both retain activation`() {
-        val p = policy(); opened(p)
-        p.opened(a.packageName, t2, OpenSource.RECENTS, 150)
-        p.reconcile(world(task(t1), task(t2)), 151)
-        p.removed(t1, a.packageName, true, 200)
-        p.reconcile(world(task(t2)), 201)
-        assertEquals(1, p.views().first { it.app == a }.cards)
-        assertTrue(p.stops(5000).isEmpty())
-    }
-
-    @Test fun `pause preserves verified cards and invalidates pending tickets`() {
-        val p = policy(); opened(p)
-        p.pause(true, 150); p.pause(false, 160)
-        p.reconcile(world(task()), 170)
-        assertEquals(1, p.views().first { it.app == a }.cards)
-        val ticket = closing(p)
-        p.pause(true, 701)
-        assertFalse(p.valid(ticket))
-    }
-
-    @Test fun `three document cards retain notification and wake permission until the last is removed`() {
-        val p = policy(); opened(p)
-        val t3 = t2.copy(taskId = 3)
-        // Documents can show and hide between polls, long after the launch confirmation expired.
-        p.visible(a.packageName, t2, true, 5000, "document-1")
-        p.visible(a.packageName, t2, false, 5001, "document-1")
-        p.visible(a.packageName, t3, true, 5002, "document-2")
-        p.visible(a.packageName, t3, false, 5003, "document-2")
-        p.reconcile(world(task(t1), task(t2), task(t3)), 5004)
-        assertEquals(3, p.views().single().cards)
-
-        for ((index, removal) in listOf(t1 to listOf(t2, t3), t2 to listOf(t3)).withIndex()) {
-            val (removed, remaining) = removal
-            val at = 5100L + index * 20
-            p.removed(removed, a.packageName, true, at)
-            p.reconcile(world(*remaining.map { task(it) }.toTypedArray()), at + 1)
-            assertEquals(remaining.size, p.views().single().cards)
-            assertEquals("card", p.views().single().state)
-            assertTrue(p.stops(at + 2).isEmpty())
-            for (kind in listOf(EntryKind.NOTIFICATION, EntryKind.BIND, EntryKind.PROCESS)) {
-                val decision = p.entry(0, CallTarget(a.packageName, kind = kind), at + 3)
-                assertTrue(decision.allow)
-                assertFalse("a verified card must not fall back to observation", decision.wouldBlock)
-            }
+        assertTrue(p.entry(0, target(), 702, b).allow)
+        p.completed(ticket, false, false, 703)
+        assertTrue(p.entry(0, target(), 704, b).allow)
+        p.completed(ticket, true, false, 705)
+        for (kind in EntryKind.entries.filter { it != EntryKind.ACTIVITY }) {
+            assertFalse(p.entry(0, target(kind = kind), 706, b).allow)
         }
-        p.removed(t3, a.packageName, true, 5200)
-        p.reconcile(world(), 5201)
-        assertEquals(0, p.views().single().cards)
-        assertTrue(p.stops(5202).isEmpty())
-        assertTrue(p.valid(p.stops(5702).single()))
+        assertTrue(p.entry(0, target(c), 707, b).allow)
     }
 
-    @Test fun `visible document reconciliation continues a session without activating a hidden historical sibling`() {
+    @Test fun unknownCallerSystemAndOtherUsersFailOpen() {
+        val p = policy(); stopped(p)
+        assertTrue(p.entry(0, target(), 11).allow)
+        assertTrue(p.entry(0, target(), 11, b.copy(installedAt = 99)).allow)
+        val system = AppKey(0, "android", 1000, 1, "platform")
+        p.setApps(listOf(a, b, c, system), 12)
+        assertTrue(p.entry(0, target(), 13, system).allow)
+        assertTrue(p.entry(10, target(), 13, b).allow)
+    }
+
+    @Test fun lastCardUserCloseWaitsForReviewAndExplicitStopSuccess() {
+        val p = policy(); opened(p)
+        val ticket = closing(p)
+        assertTrue(p.valid(ticket))
+        assertNotEquals("stopped", p.views().single().state)
+        p.completed(ticket, true, false, 702)
+        assertEquals("stopped", p.views().single().state)
+        assertTrue(p.isRestricted(a.packageName))
+    }
+
+    @Test fun ordinaryFinishOrProcessAppearanceCannotCreateCloseIntent() {
+        val p = policy(); opened(p)
+        p.removed(t1, a.packageName, false, 200)
+        p.reconcile(world(), 201)
+        p.runningWithoutPermission(a.packageName, 202)
+        p.visible(b.packageName, t2, true, 203)
+        p.visible(b.packageName, t2, false, 204)
+        p.reconcile(world(), 205)
+        assertTrue(p.stops(100_000).isEmpty())
+    }
+
+    @Test fun multipleDocumentCardsSurviveOriginalCardRemoval() {
+        val p = policy(); opened(p)
         val t3 = t2.copy(taskId = 3)
+        p.visible(a.packageName, t2, true, 150, "doc2")
+        p.visible(a.packageName, t2, false, 151, "doc2")
+        p.visible(a.packageName, t3, true, 152, "doc3")
+        p.visible(a.packageName, t3, false, 153, "doc3")
+        p.reconcile(world(task(), task(t2), task(t3)), 154)
+        assertEquals(3, p.views().single().cards)
+        p.removed(t1, a.packageName, true, 200)
+        p.reconcile(world(task(t2), task(t3)), 201)
+        assertEquals(2, p.views().single().cards)
+        assertTrue(p.stops(701).isEmpty())
+        p.removed(t2, a.packageName, true, 702)
+        p.reconcile(world(task(t3)), 703)
+        assertTrue(p.stops(1203).isEmpty())
+        p.removed(t3, a.packageName, true, 1204)
+        p.reconcile(world(), 1205)
+        assertTrue(p.stops(1205).isEmpty())
+        assertTrue(p.valid(p.stops(1705).single()))
+    }
+
+    @Test fun actualVisiblePageActivatesOnlyItsOwnEligibleTask() {
+        val p = policy()
+        p.reconcile(world(task(t1, visible = true), task(t2)), 100)
+        assertEquals(1, p.views().single().cards)
+        p.reconcile(world(task(t1), task(t2)), 101)
+        assertEquals(1, p.views().single().cards)
+    }
+
+    @Test fun excludedPagesAndPipAreProtectedWithoutInventingCards() {
+        val p = policy(); opened(p)
+        p.reconcile(world(task(visible = true, eligible = false)), 200)
+        assertEquals(0, p.views().single().cards)
+        assertEquals("visible", p.views().single().state)
+        p.reconcile(world(task()), 201)
+        assertEquals(1, p.views().single().cards)
+        assertTrue(p.stops(10_000).isEmpty())
+    }
+
+    @Test fun reopeningBeforeProcessStartCancelsOldStopWithoutCallerProof() {
+        val p = policy(); opened(p); val ticket = closing(p)
+        p.starting(a.packageName, 702)
+        assertFalse(p.valid(ticket))
+        p.runningWithoutPermission(a.packageName, 703)
+        p.reconcile(world(), 10_000)
+        assertTrue(p.stops(10_000).isEmpty())
+        p.opened(a.packageName, t2, OpenSource.ACTIVITY, 10_001)
+        p.reconcile(world(task(t2)), 10_002)
+        assertEquals(1, p.views().single().cards)
+    }
+
+    @Test fun rejectedNativeActivityCannotRevokeAnExistingRestriction() {
+        val p = policy(); stopped(p)
+        p.starting(a.packageName, 11)
+        p.reconcile(world(), 100_000)
+        assertTrue(p.isRestricted(a.packageName))
+        assertFalse(p.entry(0, target(), 100_001, b).allow)
+        assertTrue(p.stops(100_501).isEmpty()) // It is still stopped; no extra force-stop.
+    }
+
+    @Test fun historicalTasksAndInitializationAreNeverSwept() {
         val p = PermissionPolicy().apply {
             setApps(listOf(a), 0); configure(rule, 0); pause(false, 0)
-            reconcile(world(task(t2)), 1)
+            reconcile(world(task()), 100)
         }
-        p.opened(a.packageName, t1, OpenSource.LAUNCHER, 100)
-        p.reconcile(world(task(t1, visible = true), task(t2)), 101)
-        assertEquals(1, p.views().single().cards)
-        // The snapshot provides the visible task when a window callback was missed.
-        p.reconcile(world(task(t1), task(t2), task(t3, visible = true)), 5000)
-        p.reconcile(world(task(t1), task(t2), task(t3)), 5001)
-        assertEquals(2, p.views().single().cards)
-        p.removed(t1, a.packageName, true, 5100)
-        p.reconcile(world(task(t2), task(t3)), 5101)
-        assertEquals(1, p.views().single().cards)
-        assertEquals("card", p.views().single().state)
-    }
-
-    @Test fun `an excluded document stays visible protection rather than an additional card`() {
-        val p = policy(); opened(p)
-        p.visible(a.packageName, t2, true, 5000, "excluded-document")
-        p.reconcile(world(task(t1), task(t2, visible = true, eligible = false)), 5001)
-        assertEquals(1, p.views().single().cards)
-        p.visible(a.packageName, t2, false, 5002, "excluded-document")
-        p.reconcile(world(task(t1), task(t2, eligible = false)), 5003)
-        assertEquals(1, p.views().single().cards)
-    }
-
-    @Test fun `a stopped session cannot activate a new document through visibility alone`() {
-        val p = policy(); opened(p)
-        p.completed(p.manual(a.packageName)!!, true, false, 200)
-        p.visible(a.packageName, t2, true, 5000, "unconfirmed-document")
-        p.reconcile(world(task(t1), task(t2, visible = true)), 5001)
         assertEquals(0, p.views().single().cards)
-        p.visible(a.packageName, t2, false, 5002, "unconfirmed-document")
-        p.reconcile(world(task(t1), task(t2)), 5003)
-        assertEquals("uncertain", p.views().single().state)
+        assertTrue(p.entry(0, target(), 101, a).allow)
+        assertTrue(p.stops(100_000).isEmpty())
     }
 
-    @Test fun `unknown snapshot clears old deadline and recovery needs new review`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.unknown(701)
-        assertFalse(p.valid(ticket))
-        p.reconcile(world(), 5000)
-        assertTrue(p.stops(5000).isEmpty())
-        assertEquals(1, p.stops(5500).size)
-    }
-
-    @Test fun `historic close during initialization is retained`() {
+    @Test fun initialExplicitCloseIsRetainedUntilFactsBecomeReady() {
         val p = PermissionPolicy()
         p.setApps(listOf(a), 0); p.configure(rule, 0); p.pause(false, 0)
         p.removed(t1, a.packageName, true, 1)
@@ -336,381 +180,205 @@ class PermissionPolicyTest {
         assertEquals("user_closed", p.stops(600).single().reason)
     }
 
-    @Test fun `visible operation survives timeout and hidden operation has a short fallback`() {
-        val p = policy(); opened(p)
-        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
-        p.removed(t1, a.packageName, true, 200)
-        p.reconcile(world(visible = setOf(b.packageName)), 201)
-        p.reconcile(world(visible = setOf(b.packageName)), 700_000)
-        assertTrue(p.stops(700_000).isEmpty())
-        assertEquals("visible", p.views().first { it.app == b }.state)
-        p.reconcile(world(), 700_001)
-        assertFalse(p.flowDetails().isEmpty())
-        p.reconcile(world(), 730_001)
-        assertTrue(p.flowDetails().isEmpty())
+    @Test fun activeCardCallerCanUseStoppedDependenciesWithoutComponentOrTouchProof() {
+        val p = policy(); stopped(p, b)
+        opened(p)
+        for (kind in listOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
+            assertTrue(p.entry(0, target(b, kind, "Different"), 102, a).allow)
+        }
+        assertFalse(p.entry(0, target(b), 103, c).allow)
+        val flow = p.beginFlow(a.packageName, "source", target(b), 104, observed = true)!!
+        assertTrue(p.entry(0, target(b, EntryKind.BIND, "Other"), 105, c).allow)
+        assertTrue(p.extendFlow(flow, b.packageName, target(c, EntryKind.SERVICE), 106))
+        assertEquals("operation", p.views().first { it.app == c }.state)
     }
 
-    @Test fun `binding lifecycle holds a hidden operation until release within fallback`() {
-        val p = policy(); opened(p)
-        val target = CallTarget(b.packageName, "pay/Service", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, 150)!!
-        assertTrue(p.bind(flow, "connection", target, 151))
-        p.finishFlow(flow, now = 200)
-        p.reconcile(world(), 20_000)
-        assertEquals("operation", p.views().first { it.app == b }.state)
-        p.unbind("connection", 20_001)
-        p.reconcile(world(), 20_002)
-        assertNotEquals("operation", p.views().first { it.app == b }.state)
-        assertTrue(p.stops(20_002).isEmpty())
-        assertTrue(p.stops(20_502).any { it.app == b })
-    }
-
-    @Test fun `an already permitted callee still protects the source operation lifecycle`() {
+    @Test fun completedOperationAloneDoesNotStopItsParticipants() {
         val p = policy()
-        p.opened(a.packageName, t1, OpenSource.LAUNCHER, 100)
-        p.opened(b.packageName, t2, OpenSource.LAUNCHER, 100)
-        p.reconcile(world(task(t1), task(t2, b.packageName)), 101)
-        val flow = p.beginFlow(a.packageName, "source", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150, observed = true)!!
-        p.removed(t1, a.packageName, true, 200)
-        p.reconcile(world(task(t2, b.packageName)), 201)
-        assertTrue(p.stops(20_000).isEmpty())
-        p.finishFlow(flow, 20_001)
-        assertTrue(p.stops(20_003).isEmpty())
-        assertEquals(listOf(a), p.stops(20_503).map { it.app })
+        val flow = p.beginFlow(a.packageName, "source", target(b), 100)!!
+        p.flowActivity(flow, "service", true, 101)
+        p.flowActivity(flow, "service", false, 102)
+        p.finishFlow(flow, 103)
+        assertTrue(p.liveFlowIds().isEmpty())
+        assertTrue(p.stops(100_000).isEmpty())
+        assertTrue(p.entry(0, target(b), 100_001, c).allow)
     }
 
-    @Test fun `shared task participants stay protected until Activity lifecycle ends`() {
-        val p = policy(); opened(p)
-        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
-        p.flowActivity(flow, "pay-activity", true, 151)
-        p.finishFlow(flow, 200)
-        p.reconcile(world(task(t1)), 20_000)
-        assertEquals("operation", p.views().first { it.app == b }.state)
-        p.flowActivity(flow, "pay-activity", false, 20_001)
-        p.reconcile(world(task(t1)), 20_002)
-        assertTrue(p.stops(20_002).isEmpty())
-        assertTrue(p.stops(20_502).any { it.app == b })
-        assertFalse(p.stops(20_502).any { it.app == a })
-    }
-
-    @Test fun `operation target cannot grant unrelated services or unrelated packages`() {
+    @Test fun pendingUserCloseWaitsForLastUnbindAndActualDestructionBeyondTimeout() {
         val p = policy()
-        val target = CallTarget(b.packageName, "pay/Service", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, 100)!!
-        p.reconcile(world(), 4000)
-        assertTrue(p.entry(0, target, 4000, a).allow)
-        assertFalse("an unrelated caller cannot reuse another operation", p.entry(0, target, 4000, c).allow)
-        assertFalse("missing caller identity is not a grant", p.entry(0, target, 4000).allow)
-        assertFalse(p.entry(0, target.copy(component = "pay/Unrelated"), 4000).allow)
-        assertFalse(p.entry(0, target.copy(packageName = c.packageName), 4000).allow)
-        assertFalse(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Confirm", EntryKind.ACTIVITY), false, 4001))
-        assertTrue(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Confirm", EntryKind.ACTIVITY), true, 4002))
+        val service = target(b, EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, "source", service, 100)!!
+        assertTrue(p.bind(flow, "connection", service, 101, a))
+        p.flowActivity(flow, "service-record", true, 102)
+        p.removed(t2, b.packageName, true, 103)
+        p.finishFlow(flow, 104)
+        p.reconcile(world(), 100_000)
+        assertTrue(p.stops(100_000).isEmpty())
+        p.unbind("connection", 100_001)
+        assertTrue(p.stops(150_000).isEmpty())
+        p.flowActivity(flow, "service-record", false, 150_001)
+        p.reconcile(world(), 150_002)
+        assertTrue(p.stops(150_002).isEmpty())
+        assertEquals(b, p.stops(150_502).single().app)
     }
 
-    @Test fun `visible app without trusted open protects window but does not activate hidden siblings`() {
+    @Test fun orderedBroadcastRecordProtectsGapBetweenReceivers() {
         val p = policy()
-        p.reconcile(world(task(t1, visible = true), task(t2)), 100)
-        assertEquals(0, p.views().first { it.app == a }.cards)
-        assertTrue(p.entry(0, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 100).allow)
+        val flow = p.beginFlow(a.packageName, null, target(b, EntryKind.BROADCAST), 100)!!
+        p.flowActivity(flow, "record", true, 101)
+        p.flowActivity(flow, "receiver0", true, 102)
+        p.removed(t2, b.packageName, true, 103)
+        p.flowActivity(flow, "receiver0", false, 104); p.finishFlow(flow, 105)
+        p.reconcile(world(), 100_000)
+        assertTrue(p.stops(100_000).isEmpty())
+        p.flowActivity(flow, "receiver1", true, 100_001)
+        p.flowActivity(flow, "receiver1", false, 100_002)
+        p.flowActivity(flow, "record", false, 100_003)
+        p.reconcile(world(), 100_004)
+        assertTrue(p.stops(100_004).isEmpty())
+        assertEquals(b, p.stops(100_504).single().app)
     }
 
-    @Test fun `excluded visible activity gets no card permission`() {
+    @Test fun idleOperationExpiresWithoutCreatingCloseIntent() {
         val p = policy()
-        p.opened(a.packageName, t1, OpenSource.LAUNCHER, 100)
-        p.reconcile(world(task(visible = true, eligible = false)), 101)
-        assertEquals(0, p.views().first { it.app == a }.cards)
-        assertEquals("visible", p.views().first { it.app == a }.state)
+        p.beginFlow(a.packageName, null, target(b), 100)
+        p.reconcile(world(), 30_100)
+        assertTrue(p.liveFlowIds().isEmpty())
+        assertTrue(p.stops(30_600).isEmpty())
     }
 
-    @Test fun `reinstall and UID reuse cannot inherit exception or ticket`() {
-        val p = policy(); opened(p)
+    @Test fun systemBindingCreatedPausedSurvivesResumeAndHiddenTimeout() {
+        val p = policy(); p.pause(true, 100)
+        val tile = target(b, EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, null, tile, 101, systemBinding = true)!!
+        assertEquals(flow, p.beginFlow(a.packageName, null, tile, 102, systemBinding = true))
+        p.bind(flow, "tile", tile, 103, a); p.flowActivity(flow, "service", true, 104)
+        p.removed(t2, b.packageName, true, 105); p.finishFlow(flow, 106)
+        p.pause(false, 100_000); p.reconcile(world(), 100_001)
+        assertTrue(p.stops(100_001).isEmpty())
+        assertTrue(p.systemBound(b))
+        assertTrue(p.entry(0, target(b, EntryKind.SERVICE, "Helper"), 100_002, b).allow)
+    }
+
+    @Test fun widgetVpnAndExceptionsCancelPendingStopAndRemovalDoesNotInventOne() {
+        val p = policy(); opened(p); val ticket = closing(p)
+        p.configure(rule.copy(essential = mapOf(a.packageName to setOf("app_widget", "vpn"))), 702)
+        assertFalse(p.valid(ticket)); assertNull(p.manual(a.packageName))
+        assertTrue(p.stops(1000).isEmpty())
+        p.configure(rule, 1001)
+        assertTrue(p.stops(1001).isEmpty())
+        assertTrue(p.valid(p.stops(1501).single())) // Existing close intent still applies.
+        val q = policy(); q.running(setOf(a.packageName), 2, baseline = false)
+        q.configure(rule.copy(exceptions = setOf(a)), 3); q.configure(rule, 4)
+        assertTrue(q.stops(100_000).isEmpty())
+    }
+
+    @Test fun uncertainCallerDefersResurrectionStopUntilFreshReview() {
+        val p = policy(); stopped(p)
+        p.reviewLater(a.packageName, 11); p.runningWithoutPermission(a.packageName, 12)
+        p.reconcile(world(), 30_010); assertTrue(p.stops(30_010).isEmpty())
+        p.reconcile(world(), 30_011); assertTrue(p.stops(30_011).isEmpty())
+        assertTrue(p.valid(p.stops(30_511).single()))
+    }
+
+    @Test fun completedCloseRestrictsResurrectionButNotUnrelatedProcesses() {
+        val p = policy(); stopped(p)
+        p.running(setOf(a.packageName, b.packageName), 11, baseline = false)
+        assertTrue(p.stops(11).isEmpty())
+        assertEquals(listOf(a), p.stops(511).map { it.app })
+    }
+
+    @Test fun manualStopRevokesOldThumbnailUntilAnyNativePageOpen() {
+        val p = policy(); opened(p); stopped(p, at = 200)
+        p.reconcile(world(task()), 201)
+        assertEquals("stopped", p.views().single().state)
+        assertFalse(p.entry(0, target(), 202, b).allow)
+        p.opened(a.packageName, t1, OpenSource.ACTIVITY, 203)
+        p.reconcile(world(task()), 204)
+        assertEquals("card", p.views().single().state)
+        assertFalse(p.isRestricted(a.packageName))
+    }
+
+    @Test fun pauseConfigurationAndUnknownFactsInvalidateOldTickets() {
+        val p = policy(); opened(p); val ticket = closing(p)
+        p.pause(true, 702); assertFalse(p.valid(ticket))
+        p.pause(false, 703); p.configure(rule.copy(generation = 2), 704)
+        assertFalse(p.valid(ticket)); assertTrue(p.stops(704).isEmpty())
+        val next = p.stops(1204).single(); p.unknown(1205)
+        assertFalse(p.valid(next)); p.reconcile(world(), 5000)
+        assertTrue(p.stops(5000).isEmpty()); assertTrue(p.valid(p.stops(5500).single()))
+    }
+
+    @Test fun newUnobservedTaskDefersStopWithoutDeadlineBasedKill() {
+        val p = policy(); opened(p); val ticket = closing(p)
+        p.reconcile(world(task(t2)), 702)
+        assertFalse(p.valid(ticket)); p.reconcile(world(task(t2)), 100_000)
+        assertTrue(p.stops(100_000).isEmpty())
+    }
+
+    @Test fun installationChangeRevokesRestrictionsExceptionsAndOldTickets() {
+        val p = policy(); opened(p); val ticket = closing(p)
+        p.completed(ticket, true, false, 702)
+        p.configure(rule.copy(exceptions = setOf(a)), 703)
+        val replacement = a.copy(installedAt = 99, signer = "new")
+        p.setApps(listOf(replacement, b, c), 704); p.reconcile(world(), 705)
+        assertFalse(p.valid(ticket)); assertFalse(p.isRestricted(a.packageName))
+        assertTrue(p.entry(0, target(), 706, b).allow)
+    }
+
+    @Test fun reinstallingSourceDropsOperationWithoutStoppingOtherParticipants() {
+        val p = policy(); p.beginFlow(a.packageName, "source", target(b), 100)
+        p.setApps(listOf(a.copy(installedAt = 99), b, c), 101)
+        assertTrue(p.liveFlowIds().isEmpty()); assertTrue(p.stops(100_000).isEmpty())
+    }
+
+    @Test fun sharedUidNewSessionAndUnknownMemberBlockNativeStop() {
+        val sibling = b.copy(uid = a.uid)
+        val p = policy(); p.setApps(listOf(a, sibling, c), 2); opened(p)
         val ticket = closing(p)
-        p.configure(rule.copy(exceptions = setOf(a), generation = 2), 701)
-        val replacement = a.copy(installedAt = 999, signer = "different")
-        p.setApps(listOf(replacement, b, c), 702)
-        p.reconcile(world(), 703)
-        assertFalse(p.valid(ticket))
-        assertFalse(p.entry(0, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 703).allow)
+        assertTrue(p.valid(ticket, setOf(a.packageName, b.packageName)))
+        p.starting(b.packageName, 702)
+        assertFalse(p.valid(ticket, setOf(a.packageName, b.packageName)))
+        assertFalse(p.valid(ticket, setOf(a.packageName, "unknown")))
     }
 
-    @Test fun `observe does not stop and disabling observe permits a fresh stop`() {
+    @Test fun otherUserVisibilityAndNewBootDoNotReuseOldPolicyState() {
+        val p = policy(); stopped(p)
+        p.reconcile(world(task(t1.copy(userId = 10), visible = true)), 11)
+        assertFalse(p.views().any { it.visible })
+        p.reconcile(world(boot = "next"), 12)
+        assertFalse(p.isRestricted(a.packageName)); assertTrue(p.stops(100_000).isEmpty())
+    }
+
+    @Test fun observeOnlyRecordsExplicitCloseAndNeverCreatesRestrictions() {
         val p = policy(); opened(p)
         p.configure(rule.copy(observe = true, generation = 2), 150)
         val ticket = closing(p)
-        assertFalse(p.valid(ticket))
-        p.completed(ticket, false, true, 701)
-        assertTrue(p.stops(900).isEmpty())
-        p.configure(rule.copy(generation = 3), 1000)
-        assertTrue(p.stops(1000).isEmpty())
-        assertTrue(p.valid(p.stops(1500).single()))
+        assertFalse(p.valid(ticket)); p.completed(ticket, false, true, 702)
+        assertTrue(p.stops(10_000).isEmpty()); assertFalse(p.isRestricted(a.packageName))
+        p.configure(rule.copy(generation = 3), 10_001)
+        assertTrue(p.stops(10_001).isEmpty()); assertTrue(p.valid(p.stops(10_501).single()))
     }
 
-    @Test fun `failed stop retries and does not mark a batch stopped in advance`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.completed(ticket, false, false, 701)
-        assertNotEquals("stopped", p.views().first { it.app == a }.state)
-        assertTrue(p.stops(30_700).isEmpty())
-        assertEquals(1, p.stops(30_701).size)
-    }
-
-    @Test fun `other users and new boot cannot inherit task permission`() {
-        val p = policy(); opened(p)
-        assertTrue(p.entry(10, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 200).allow)
-        p.reconcile(world(task(t1.copy(boot = "new")), boot = "new"), 300)
-        assertEquals(0, p.views().first { it.app == a }.cards)
-        assertTrue(p.stops(10_000).isEmpty())
-    }
-
-    @Test fun `new config and newly visible split or pip invalidate old work`() {
-        val p = policy(); opened(p)
-        val ticket = closing(p)
-        p.reconcile(world(visible = setOf(a.packageName, b.packageName)), 701)
-        assertFalse(p.valid(ticket))
-        assertTrue(p.stops(10_000).isEmpty())
-        assertEquals("visible", p.views().first { it.app == b }.state)
-    }
-
-    @Test fun `return to visible shop does not retain a completed payment process`() {
-        val p = policy(); opened(p)
-        val flow = p.beginFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 150)!!
-        p.flowActivity(flow, "pay-activity", true, 151)
-        p.flowActivity(flow, "pay-activity", false, 200)
-        p.finishFlow(flow, 201)
-        p.reconcile(world(task(visible = true)), 40_000)
-        assertTrue(p.flowDetails().isEmpty())
-        assertTrue(p.stops(40_000).isEmpty())
-        assertTrue(p.stops(40_500).any { it.app == b })
-        assertFalse(p.stops(40_500).any { it.app == a })
-    }
-
-    @Test fun `unknown visible launch is observed without gaining a persistent card`() {
-        val p = policy()
-        val flow = p.beginFlow(a.packageName, "shop-activity", CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100, observed = true)!!
-        p.reconcile(world(task(t2, b.packageName, true)), 101)
-        assertEquals(0, p.views().first { it.app == b }.cards)
-        assertTrue(p.flowDetails().single().endsWith("observed"))
-        p.flowActivity(flow, "pay-activity", true, 102)
-        p.reconcile(world(task(t2, b.packageName)), 4000)
-        assertTrue(p.entry(0, CallTarget(b.packageName, "pay/Confirm", EntryKind.PROCESS), 4000).allow)
-        assertFalse(p.entry(0, CallTarget(b.packageName, "pay/Other", EntryKind.PROCESS), 4000).allow)
-        assertFalse(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Confirm", EntryKind.ACTIVITY), true, 4001))
-        assertFalse(p.entry(0, CallTarget(b.packageName, "pay/Other", EntryKind.SERVICE), 4000).allow)
-    }
-
-    @Test fun `dependency grants remain inside actual flow participants and components`() {
-        val p = policy()
-        val flow = p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 100)!!
-        val service = CallTarget(b.packageName, "pay/ResultService", EntryKind.BIND)
-        assertTrue(p.dependency(flow, a.packageName, service, 101))
-        assertFalse(p.dependency(flow, a.packageName, service.copy(packageName = c.packageName), 102))
-        assertFalse(p.dependency(flow, a.packageName, service.copy(component = null), 103))
-        p.reconcile(world(), 4000)
-        assertTrue(p.entry(0, service, 4000, a).allow)
-        assertFalse("an exact dependency of a confirmed flow is not observation", p.entry(0, service, 4000, a).wouldBlock)
-        assertFalse(p.entry(0, service.copy(component = "pay/Unrelated"), 4000).allow)
-    }
-
-    @Test fun `one removed binding does not release another connection in the operation`() {
-        val p = policy()
-        val target = CallTarget(b.packageName, "pay/ResultService", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, target, 100)!!
-        p.bind(flow, "connection-1", target, 101); p.bind(flow, "connection-2", target, 102)
-        p.finishFlow(flow, 103)
-        p.unbind("connection-1", 104)
-        p.reconcile(world(), 20_000)
-        assertFalse(p.flowDetails().isEmpty())
-        p.unbind("connection-2", 20_001)
-        p.reconcile(world(), 20_002)
-        assertTrue(p.flowDetails().isEmpty())
-    }
-
-    @Test fun `another users visible task cannot protect the primary users installation`() {
-        val p = policy()
-        p.reconcile(world(task(t1.copy(userId = 10), visible = true)), 100)
-        assertFalse(p.views().any { it.app == a && it.visible })
-        assertFalse(p.entry(0, CallTarget(a.packageName, kind = EntryKind.NOTIFICATION), 100).allow)
-    }
-
-    @Test fun `manual stop can target background card but not visible work or an operation`() {
-        val p = policy(); opened(p)
-        assertTrue(p.valid(p.manual(a.packageName)!!))
-        p.visible(a.packageName, t1, true, 200)
-        assertNull(p.manual(a.packageName))
-        p.visible(a.packageName, t1, false, 201)
-        p.beginFlow(a.packageName, null, CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY), 202)
-        assertNull(p.manual(b.packageName))
-        assertNull(p.manual(a.packageName))
-    }
-
-    @Test fun `pip eligibility changes retain the original task activation`() {
-        val p = policy(); opened(p)
-        p.reconcile(world(task(visible = true, eligible = false)), 200)
-        assertEquals(0, p.views().single().cards)
-        p.reconcile(world(task()), 300)
-        assertEquals(1, p.views().single().cards)
-        assertTrue(p.stops(4000).isEmpty())
-    }
-
-    @Test fun `unconfirmed task provenance is never resolved by a kill timer`() {
+    @Test fun failedStopRetriesWithoutRestrictingOrFalselyMarkingStopped() {
         val p = policy(); opened(p); val ticket = closing(p)
-        p.reconcile(world(task(t2)), 701)
-        p.reconcile(world(task(t2)), 100_000)
-        assertFalse(p.valid(ticket))
-        assertTrue(p.stops(100_001).isEmpty())
-        assertEquals("uncertain", p.views().single().state)
+        p.completed(ticket, false, false, 702)
+        assertFalse(p.isRestricted(a.packageName)); assertNotEquals("stopped", p.views().single().state)
+        assertTrue(p.stops(30_701).isEmpty()); assertEquals(1, p.stops(30_702).size)
     }
 
-    @Test fun `concurrent operations require a unique activity association`() {
-        val p = policy()
-        val target = CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY)
-        val first = p.beginFlow(a.packageName, "source-1", target, 100)!!
-        p.beginFlow(a.packageName, "source-2", target, 101)!!
-        assertNull(p.flowFor(a.packageName))
-        assertEquals(first, p.flowFor(a.packageName, "source-1"))
+    @Test fun manualStopCannotInterruptVisibleOperationOrSystemRole() {
+        val p = policy(); opened(p); assertNotNull(p.manual(a.packageName))
+        p.visible(a.packageName, t1, true, 200); assertNull(p.manual(a.packageName))
+        p.visible(a.packageName, t1, false, 201)
+        p.beginFlow(a.packageName, null, target(b), 202)
+        assertNull(p.manual(a.packageName)); assertNull(p.manual(b.packageName))
     }
 
-    @Test fun `revoking a running exception schedules a fresh targeted review`() {
+    @Test fun cachedPriorityProtectsActiveSessionsAndEndsOnPause() {
         val p = policy(); opened(p)
-        p.configure(rule.copy(exceptions = setOf(a), generation = 2), 150)
-        p.removed(t1, a.packageName, true, 200); p.reconcile(world(), 201)
-        p.configure(rule.copy(generation = 3), 400)
-        assertTrue(p.stops(400).isEmpty())
-        assertEquals("exception_revoked", p.stops(900).single().reason)
-    }
-
-    @Test fun `confirmed multilevel flow keeps exact dependencies and releases only after all components finish`() {
-        val p = policy(); opened(p)
-        val pay = CallTarget(b.packageName, "pay/Confirm", EntryKind.ACTIVITY)
-        val flow = p.beginFlow(a.packageName, "shop-page", pay, 150)!!
-        p.flowActivity(flow, "pay-page", true, 151)
-        assertTrue(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), true, 152))
-        p.flowActivity(flow, "bank-page", true, 153)
-        val service = CallTarget(b.packageName, "pay/Service", EntryKind.SERVICE)
-        val broadcast = CallTarget(c.packageName, "bank/Receiver", EntryKind.BROADCAST)
-        assertTrue(p.dependency(flow, a.packageName, service, 154))
-        assertTrue(p.dependency(flow, b.packageName, broadcast, 155))
-        p.flowActivity(flow, "service", true, 156)
-        p.flowActivity(flow, "broadcast:0", true, 157)
-        p.flowActivity(flow, "broadcast:1", true, 158)
-        p.reconcile(world(task()), 4000)
-        assertEquals("operation", p.entry(0, service, 4000, a).reason)
-        assertFalse(p.entry(0, service.copy(component = "pay/Other"), 4000, a).allow)
-        assertFalse(p.entry(0, service, 4000, c).allow)
-        for ((index, token) in listOf("bank-page", "pay-page", "service", "broadcast:0").withIndex()) {
-            p.flowActivity(flow, token, false, 4001L + index)
-            p.finishFlow(flow, 4001L + index)
-            assertEquals(flow, p.flowFor(b.packageName))
-        }
-        p.flowActivity(flow, "broadcast:1", false, 4010)
-        p.finishFlow(flow, 4010)
-        assertNull(p.flowFor(b.packageName))
-        assertTrue(p.stops(4011).isEmpty())
-        assertEquals(setOf(b, c), p.stops(4511).map { it.app }.toSet())
-        assertEquals("card", p.views().first { it.app == a }.state)
-    }
-
-    @Test fun `final unbind keeps protection until the bound service finishes destroying`() {
-        val p = policy(); opened(p)
-        val target = CallTarget(b.packageName, "pay/BoundService", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, "shop-page", target, 150)!!
-        assertTrue(p.bind(flow, "connection", target, 151, a))
-        p.flowActivity(flow, "service-record", true, 152)
-        p.finishFlow(flow, 153)
-        p.unbind("connection", 4000)
-        assertEquals(flow, p.flowFor(b.packageName))
-        assertTrue(p.stops(4500).isEmpty())
-        p.flowActivity(flow, "service-record", false, 5000)
-        p.finishFlow(flow, 5000)
-        assertNull(p.flowFor(b.packageName))
-        assertTrue(p.stops(5001).isEmpty())
-        assertEquals(b, p.stops(5501).single().app)
-    }
-
-    @Test fun `system tile binding survives the hidden timeout and waits for native destruction`() {
-        val p = policy(); opened(p)
-        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, tile, 150, systemBinding = true)!!
-        assertTrue(p.bind(flow, "tile-connection", tile, 151, a))
-        p.flowActivity(flow, "tile-service", true, 152)
-        p.finishFlow(flow, 153)
-        p.runningWithoutPermission(b.packageName, 154)
-        p.reconcile(world(task()), 40_000)
-        assertTrue(p.stops(40_000).isEmpty())
-        assertTrue(p.entry(0, tile.copy(kind = EntryKind.PROCESS), 40_000).allow)
-        p.unbind("tile-connection", 40_001)
-        assertTrue(p.stops(80_000).isEmpty())
-        p.flowActivity(flow, "tile-service", false, 80_001)
-        p.finishFlow(flow, 80_001)
-        assertTrue(p.stops(80_002).isEmpty())
-        assertEquals(b, p.stops(80_502).single().app)
-        assertFalse(p.entry(0, tile.copy(kind = EntryKind.PROCESS), 80_502).allow)
-    }
-
-    @Test fun `system tile binding grants only its resolved component and cannot extend an app operation`() {
-        val p = policy(); opened(p)
-        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, tile, 150, systemBinding = true)!!
-        assertEquals(flow, p.beginFlow(a.packageName, null, tile, 151, systemBinding = true))
-        assertTrue(p.entry(0, tile, 151, a).allow)
-        assertFalse(p.entry(0, tile, 151, c).allow)
-        assertFalse(p.entry(0, tile.copy(component = "pay/Other"), 151, a).allow)
-        assertFalse(p.entry(0, tile.copy(kind = EntryKind.SERVICE), 151, a).allow)
-        assertFalse(p.entry(0, tile.copy(component = "pay/Other", kind = EntryKind.PROCESS), 151).allow)
-        assertFalse(p.dependency(flow, a.packageName, tile.copy(component = "pay/Other"), 152))
-        assertFalse(p.extendFlow(flow, b.packageName, CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), true, 153))
-        assertNull(p.flowFor(b.packageName))
-        val ordinary = p.beginFlow(a.packageName, "shop-page", CallTarget(c.packageName, "bank/Auth", EntryKind.ACTIVITY), 154)!!
-        assertEquals(ordinary, p.flowFor(a.packageName))
-        assertEquals(flow, p.flowForCall(a, tile))
-        assertNull(p.beginFlow(a.packageName, null, tile.copy(component = null), 155, systemBinding = true))
-        assertNull(p.beginFlow(a.packageName, null, tile.copy(kind = EntryKind.SERVICE), 155, systemBinding = true))
-    }
-
-    @Test fun `tile binding created while paused survives resume but not a replacement installation`() {
-        val p = policy()
-        p.pause(true, 100)
-        val tile = CallTarget(b.packageName, "pay/Tile", EntryKind.BIND)
-        val flow = p.beginFlow(a.packageName, null, tile, 101, systemBinding = true)!!
-        p.bind(flow, "tile-connection", tile, 102, a)
-        p.finishFlow(flow, 103)
-        p.pause(false, 40_000)
-        assertTrue(p.stops(40_001).isEmpty())
-        assertTrue(p.entry(0, tile, 40_001, a).allow)
-        p.setApps(listOf(a, b.copy(installedAt = 99), c), 40_002)
-        assertFalse(p.entry(0, tile, 40_002, a).allow)
-        assertTrue(p.liveFlowIds().isEmpty())
-    }
-
-    @Test fun `cross app input cannot activate a persistent card or the direct open window`() {
-        val p = policy()
-        p.opened(b.packageName, t2, OpenSource.USER_INTERACTION, 100)
-        p.reconcile(world(task(t2, b.packageName, true)), 101)
-        assertEquals(0, p.views().first { it.app == b }.cards)
-        p.reconcile(world(), 102)
-        assertFalse(p.entry(0, CallTarget(b.packageName, kind = EntryKind.NOTIFICATION), 103).allow)
-    }
-
-    @Test fun `broadcast record holds an ordered operation between successive receiver deliveries`() {
-        val p = policy(); opened(p)
-        val first = CallTarget(b.packageName, "pay/FirstReceiver", EntryKind.BROADCAST)
-        val flow = p.beginFlow(a.packageName, "shop-page", first, 150)!!
-        p.flowActivity(flow, "broadcast-record", true, 151)
-        p.flowActivity(flow, "broadcast:0", true, 152)
-        p.flowActivity(flow, "broadcast:0", false, 4000)
-        p.finishFlow(flow, 4000)
-        assertEquals(flow, p.flowFor(b.packageName))
-        val next = first.copy(component = "pay/NextReceiver")
-        assertTrue(p.dependency(flow, a.packageName, next, 4001))
-        assertEquals("operation", p.entry(0, next, 4001, a).reason)
-        p.flowActivity(flow, "broadcast:1", true, 4002)
-        p.flowActivity(flow, "broadcast:1", false, 7000)
-        p.finishFlow(flow, 7000)
-        assertEquals(flow, p.flowFor(b.packageName))
-        p.flowActivity(flow, "broadcast-record", false, 7001)
-        p.finishFlow(flow, 7001)
-        assertNull(p.flowFor(b.packageName))
-        assertTrue(p.stops(7002).isEmpty())
-        assertEquals(b, p.stops(7502).single().app)
+        val group = setOf(a.packageName, b.packageName)
+        assertFalse(p.keepAlive(group)); p.beginFlow(a.packageName, null, target(b), 150)
+        assertTrue(p.keepAlive(group)); p.pause(true, 151); assertFalse(p.keepAlive(group))
     }
 }
