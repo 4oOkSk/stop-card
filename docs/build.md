@@ -64,7 +64,7 @@ ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
 
 | 目录 | 内容 |
 |---|---|
-| `app/src/main/java/io/github/user4ooksk/stopcard/policy/` | 许可规则与输入来源校验。 |
+| `app/src/main/java/io/github/user4ooksk/stopcard/policy/` | 许可与强停决策规则。 |
 | `app/src/main/java/io/github/user4ooksk/stopcard/module/` | 系统适配、状态和执行。 |
 | `app/src/main/java/io/github/user4ooksk/stopcard/bridge/` | Root 通信与恢复安装。 |
 | `app/src/main/java/io/github/user4ooksk/stopcard/ui/` | 管理界面。 |

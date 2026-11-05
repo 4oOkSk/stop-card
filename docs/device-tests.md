@@ -63,7 +63,7 @@ adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager
 5. 确认 B 在服务销毁完成前仍受保护。
 6. 确认操作结束后，临时保护释放。未被用户关闭的 B、C 交给 Android 管理，不应仅因无卡而强停。
 
-优先测试实际用户入口。ADB 可补查其他调用身份，但不代替安装器、分享和登录的真实流程。模块不再要求触摸来源证明。
+优先测试实际用户入口。ADB 可补查其他调用身份，但不代替安装器、分享和登录的真实流程。
 
 - 点击 `Open target from application context`，确认无返回结果令牌的 `NEW_TASK` 页面能打开。
 - 点击 `Delayed application-context Activity (5 s, then press Home)` 后回桌面，对照 Android 原生后台页面启动结果。Stop Card 不追加否决。
@@ -114,7 +114,7 @@ adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager
 | 广播 | 普通、异步、有序、多接收者、超时和原生跳过均能正确结束。 |
 | Job、闹钟、PendingIntent | 分别核对未关闭、已停止和重新打开三种状态。来源未知时保守放行并延后复核。 |
 | 服务销毁 | 最后一次解绑不提前释放服务保护。实际销毁完成后才复核。 |
-| 开关同包依赖 | 绑定期间依赖正常执行，不以组件不匹配拒绝请求。 |
+| 开关同包依赖 | 绑定期间所属应用及已跟踪依赖正常执行。 |
 
 广播测试需核对 `broadcast_lifetime`。服务测试需核对 `service_finish` 和 `service_teardown`。每个接收者与整条广播记录都应正常释放，不能提前结束有序广播。
 
