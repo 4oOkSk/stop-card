@@ -99,6 +99,11 @@ public class ProbeActivity extends Activity {
         button("Post delegated notification for target", () -> notify(this, target(), true));
         button("Start own foreground Service", () -> startForegroundService(new Intent(this, ForegroundProbe.class)));
         button("Stop own foreground Service", () -> stopService(new Intent(this, ForegroundProbe.class)));
+        button("Query target Provider now", () -> {
+            try (Cursor result = getContentResolver().query(Uri.parse("content://" + target() + ".probe/check"), null, null, null, null)) {
+                event("provider returned " + (result == null ? "null" : result.getCount() + " row(s)"));
+            }
+        });
         button("Finish Activity (keep task)", this::finish);
         button("Finish and remove task", this::finishAndRemoveTask);
         button("Publish own launcher shortcut", () -> {

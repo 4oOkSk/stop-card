@@ -16,6 +16,7 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Consumer
+import io.github.user4ooksk.stopcard.module.OperationLifetimes.Kind
 
 data class HookCapability(val status: String, val methods: List<String> = emptyList(), val detail: String = "")
 data class ActivityFact(val token: String, val packageName: String, val uid: Int, val task: TaskKey?, val visible: Boolean)
@@ -58,6 +59,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val disabled = ConcurrentHashMap.newKeySet<String>()
     private val fields = ConcurrentHashMap<String, Field>()
     private val methods = ConcurrentHashMap<String, Method>()
+    private val lifetimes = OperationLifetimes()
     private val launchSource = ThreadLocal<OpenSource?>()
     private val pendingObserved = ThreadLocal<Boolean?>()
     private val pendingCaller = ThreadLocal<ActivityFact?>()
@@ -223,6 +225,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val result = p.result as? Int ?: -1
             val actual = if (result in 0..3) field(p.thisObject, "mLastStartActivityRecord") ?: p.args[0] else p.args[0]
             val fact = original.copy(target = activityFact(actual))
+            if (!p.hasThrowable() && result in 0..3) lifetimes.started(fact.target.token, actual, Kind.ACTIVITY)
             sink.launched(fact, !p.hasThrowable() && result in 0..3, original.target.token)
             sink.wake()
         })
@@ -239,7 +242,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == Void.TYPE && names(it) == listOf("java.lang.String")
         }, after = { p ->
             val token = activityFact(p.thisObject).token
-            sink.activityFinished(token)
+            finished(token)
             sink.wake()
         })
     }
@@ -261,6 +264,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     val success = !p.hasThrowable() && if (kind == EntryKind.SERVICE) p.result == name else (p.result as? Int ?: 0) > 0
                     // A bound service can still be executing onDestroy after its final unbind.
                     val id = if (kind == EntryKind.BIND && !success) "failed_bind:${token(record)}" else token(record)
+                    if (success) lifetimes.started(id, record, Kind.SERVICE)
                     sink.component(id, context.source, CallTarget(name.packageName, name.flattenToString(), kind), success)
                 }
             })
@@ -305,6 +309,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     val binding = field(param.thisObject, "binding") ?: return@guarded
                     val service = field(binding, "service") ?: return@guarded
                     val name = field(service, "name") as ComponentName
+                    lifetimes.started(token(param.thisObject), param.thisObject, Kind.BINDING)
                     sink.binding(token(param.thisObject), context.source, CallTarget(name.packageName, name.flattenToString(), EntryKind.BIND), true)
                 }
             })
@@ -313,6 +318,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("binding_remove", "com.android.server.am.ActiveServices", "removeConnectionLocked", {
             it.returnType == Int::class.javaPrimitiveType && names(it).firstOrNull() == "com.android.server.am.ConnectionRecord"
         }, after = { p ->
+            lifetimes.ended(token(p.args[0]))
             sink.binding(token(p.args[0]), null, CallTarget("", kind = EntryKind.BIND), false)
         })
         // bringDownServiceLocked only schedules onDestroy. Release after Android processes the
@@ -321,7 +327,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.ServiceRecord", "boolean", "boolean", "boolean", "int")
         }, after = { p ->
             if (!p.hasThrowable() && p.args[2] == true && (field(p.args[0], "executeNesting") as Int) <= 0)
-                sink.activityFinished(token(p.args[0]))
+                finished(token(p.args[0]))
         })
         hook("service_teardown", "com.android.server.am.ActiveServices", "bringDownServiceLocked", {
             it.returnType == Void.TYPE && names(it) in listOf(
@@ -330,7 +336,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         }, after = { p ->
             // Cancelled pending services have no app callback. A scheduled destroy has nesting > 0.
             if (!p.hasThrowable() && field(p.args[0], "destroying") == false && field(p.args[0], "executeNesting") == 0)
-                sink.activityFinished(token(p.args[0]))
+                finished(token(p.args[0]))
         })
     }
 
@@ -403,7 +409,10 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 callerUid, callerPackage, origin?.evidence, origin?.observed == true,
                 if (widget) SystemEntry.WIDGET_BROADCAST else null)
             if (!decision.allow) p.result = "Stop Card: no runtime permission"
-            else sink.component(token(record), callerPackage, target, true)
+            else {
+                lifetimes.started(token(record), record, Kind.BROADCAST)
+                sink.component(token(record), callerPackage, target, true)
+            }
             // The native queue consumes this reason in both cold and warm dispatch,
             // sets DELIVERY_SKIPPED, and advances completion/timeout state itself.
         })
@@ -428,11 +437,14 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             // Release ROMs can strip the compile-time constants; use the record's native names.
             val scheduled = call(r, "deliveryStateToString", state) == "SCHEDULED"
             val terminal = call(r, "isDeliveryStateTerminal", state) == true
-            if (scheduled || (terminal && call(r, "deliveryStateToString", previous) == "SCHEDULED")) sink.component("${token(r)}:$index", field(r, "callerPackage") as? String,
-                CallTarget(pkg, name, EntryKind.BROADCAST), !terminal)
+            if (scheduled || (terminal && call(r, "deliveryStateToString", previous) == "SCHEDULED")) {
+                val id = "${token(r)}:$index"
+                if (!terminal) lifetimes.started(id, r, Kind.BROADCAST, index) else lifetimes.ended(id)
+                sink.component(id, field(r, "callerPackage") as? String, CallTarget(pkg, name, EntryKind.BROADCAST), !terminal)
+            }
             if (terminal && field(r, "terminalCount") == (field(r, "receivers") as List<*>).size) {
                 // An ordered broadcast may have no scheduled receiver between two deliveries.
-                sink.activityFinished(token(r))
+                finished(token(r))
                 synchronized(broadcastOrigins) { broadcastOrigins.remove(r) }
             }
         })
@@ -456,13 +468,14 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             val target = p.getObjectExtra("stopcard.provider") as? CallTarget ?: return@hook
             val source = p.getObjectExtra("stopcard.source") as? String
             val connection = if (!p.hasThrowable()) p.result?.let { field(it, "connection") } else null
+            if (connection != null) lifetimes.started(token(connection), connection, Kind.PROVIDER)
             sink.component(connection?.let(::token) ?: "provider_failed", source, target, connection != null)
         })
         hook("provider_finish", "com.android.server.am.ContentProviderHelper", "handleProviderRemoval", {
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.ContentProviderConnection", "boolean", "boolean")
         }, after = { p ->
             val connection = p.args[0] ?: return@hook
-            if (!p.hasThrowable() && call(connection, "totalRefCount") == 0) sink.activityFinished(token(connection))
+            if (!p.hasThrowable() && call(connection, "totalRefCount") == 0) finished(token(connection))
         })
     }
 
@@ -593,6 +606,50 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 require(records.size <= 4096)
                 records.filterNotNull().filter { (call(it, "getPid") as Int) > 0 }
                     .map { (field(it, "info") as ApplicationInfo).packageName }.toSet()
+            }
+        }
+    }
+
+    private fun finished(token: String) {
+        lifetimes.ended(token)
+        sink.activityFinished(token)
+    }
+
+    /** Worker-only reconciliation, using the same native locks as lifecycle mutations. */
+    fun reconcileOperations(tracked: Set<String>) {
+        lifetimes.prune(tracked)
+        val tasks = atm ?: error("Task service not captured")
+        synchronized(field(tasks, "mGlobalLock")!!) {
+            lifetimes.review(Kind.ACTIVITY, tracked, { record, _ -> call(record, "getTask") != null }, sink::activityFinished)
+        }
+        val service = ams ?: error("Process service not captured")
+        synchronized(service) {
+            synchronized(field(service, "mProcLock")!!) {
+                val services = field(service, "mServices")!!
+                lifetimes.review(Kind.SERVICE, tracked, { record, _ ->
+                    val map = call(field(services, "mServiceMap")!!, "get", field(record, "userId") as Int)
+                    (map?.let { (field(it, "mServicesByInstanceName") as Map<*, *>).containsValue(record) } == true) ||
+                        listOf("mPendingServices", "mRestartingServices", "mDestroyingServices").any {
+                            (field(services, it) as Collection<*>).contains(record)
+                        }
+                }, sink::activityFinished)
+                lifetimes.review(Kind.BINDING, tracked, { record, _ ->
+                    val binding = field(record, "binding")!!
+                    (field(binding, "connections") as Collection<*>).contains(record)
+                }, { token ->
+                    sink.binding(token, null, CallTarget("", kind = EntryKind.BIND), false)
+                })
+                lifetimes.review(Kind.PROVIDER, tracked, { record, _ ->
+                    val provider = field(record, "provider")!!
+                    field(record, "dead") != true && (call(record, "totalRefCount") as Int) > 0 &&
+                        (0 until (call(provider, "numberOfConnections") as Int)).any {
+                            call(provider, "getConnectionsAt", it) === record
+                        }
+                }, sink::activityFinished)
+                lifetimes.review(Kind.BROADCAST, tracked, { record, receiver ->
+                    if (receiver >= 0) !((call(record, "isDeliveryStateTerminal", (field(record, "delivery") as IntArray)[receiver])) as Boolean)
+                    else (field(record, "terminalCount") as Int) < (field(record, "receivers") as List<*>).size
+                }, sink::activityFinished)
             }
         }
     }

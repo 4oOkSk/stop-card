@@ -27,6 +27,7 @@ data class SystemFactSnapshot(
     val providers: Map<String, Triple<String, Int, String>>,
     val launcherUids: Set<Int>,
     val systemUiUid: Int,
+    val homeUids: Set<Int>,
 )
 
 /** Worker-only reads. Failure is unknown; callers retain previous facts and suspend enforcement. */
@@ -104,8 +105,13 @@ class SystemFacts(private val context: Context) {
             }
         }
         val homes = reasons.filterValues { "launcher" in it }.keys.mapNotNull { apps[it]?.uid }.toSet()
+        // Quickstep can belong to an installed system launcher while another launcher is HOME.
+        // Classify both as entry sources without adding any app to the essential/exception list.
+        @Suppress("DEPRECATION")
+        val homeUids = pm.queryIntentActivities(home, PackageManager.MATCH_ALL)
+            .mapNotNull { result -> apps[result.activityInfo?.packageName]?.uid }.toSet() + homes
         return SystemFactSnapshot(apps, apps.values.groupBy { it.uid }.mapValues { (_, group) -> group.mapTo(HashSet()) { it.packageName } },
-            reasons.mapValues { it.value.toSet() }, authorities, homes, apps["com.android.systemui"]?.uid ?: -1)
+            reasons.mapValues { it.value.toSet() }, authorities, homes, apps["com.android.systemui"]?.uid ?: -1, homeUids)
     }
 
     private fun activeVpnPackage(manager: VpnManager): String? {

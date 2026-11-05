@@ -96,7 +96,6 @@ class PermissionPolicy {
         val bindings = HashMap<String, Grant>()
         val activities = HashSet<String>()
         var finished = false
-        var trackingUnknown = false
     }
 
     private data class Published(
@@ -401,10 +400,6 @@ class PermissionPolicy {
 
     @Synchronized fun flowActivity(id: Long, token: String, added: Boolean, now: Long) {
         val f = flows[id] ?: return
-        if (added && f.activities.size >= MAX_FLOW_TARGETS && token !in f.activities) {
-            unknown(now)
-            return
-        }
         if (added) f.activities += token else f.activities -= token
         f.reviewAt = now + rule.hiddenReviewMs
         publish(now)
@@ -414,13 +409,9 @@ class PermissionPolicy {
         val f = flows[id] ?: return false
         val matching = f.grants.filter { it.target == target && (caller == null || it.caller == caller) }
         val grant = if (caller == null) matching.singleOrNull() else matching.firstOrNull()
-        if (grant == null || (f.bindings.size >= MAX_FLOW_TARGETS && token !in f.bindings)) {
-            // Android already accepted this connection. Unknown tracking must hold the operation,
-            // never silently omit a live binding and later stop its participants.
-            f.trackingUnknown = true
-            publish(now)
-            return false
-        }
+        if (grant == null) return false
+        // These are actual native connections, not component metadata. Track all accepted work;
+        // the native lifetime review removes ended records even when a callback was missed.
         f.bindings[token] = grant
         invalidate(target.packageName)
         publish(now)
@@ -459,8 +450,8 @@ class PermissionPolicy {
             if (visible) f.reviewAt = now + rule.hiddenReviewMs
             // A real connection/component outlives a timer. Missing lifecycle facts defer a
             // close; the timeout only retires an idle operation without live work.
-            val liveWork = f.bindings.isNotEmpty() || f.activities.isNotEmpty() || f.trackingUnknown
-            !visible && ((now >= (f.expiresAt ?: f.reviewAt) && !liveWork) || (!f.trackingUnknown && f.finished &&
+            val liveWork = f.bindings.isNotEmpty() || f.activities.isNotEmpty()
+            !visible && ((now >= (f.expiresAt ?: f.reviewAt) && !liveWork) || (f.finished &&
                 f.bindings.isEmpty() && f.activities.isEmpty()))
         }
         for (f in finished) {
@@ -590,6 +581,9 @@ class PermissionPolicy {
             group.all { p.states[it]?.let { v -> v.cards > 0 || v.visible || v.flows > 0 } == true }
     }
     fun liveFlowIds(): Set<Long> = synchronized(this) { flows.keys.toSet() }
+    fun operationTokens(): Set<String> = synchronized(this) {
+        flows.values.flatMapTo(HashSet()) { it.activities + it.bindings.keys }
+    }
     @Synchronized fun systemBound(app: AppKey): Boolean = apps[app.packageName] == app && flows.values.any { f ->
         f.systemBinding && f.grants.any { it.target.packageName == app.packageName } &&
             (f.bindings.isNotEmpty() || f.activities.isNotEmpty())
@@ -610,7 +604,7 @@ class PermissionPolicy {
     fun isRestricted(pkg: String): Boolean = pkg in published.restricted
     fun flowDetails(): List<String> = synchronized(this) {
         flows.values.map { f ->
-            val stage = if (f.trackingUnknown) "needs_review" else if (f.observed) "observed" else "active"
+            val stage = if (f.observed) "observed" else "active"
             "${f.id}:${f.source}:${f.grants.map { it.target.packageName }.distinct().take(4).joinToString(",")}" +
                 "; components=${f.grants.size}; bindings=${f.bindings.size}; activities=${f.activities.size}; $stage"
         }

@@ -196,6 +196,7 @@ object ModuleRuntime : FrameworkCallbacks {
         taskSource = if (ready) "ok" else "initializing"
         if (!ready) policy.unknown(now())
         repeat(pendingFacts.size) { pendingFacts.poll()?.invoke() }
+        adapter.reconcileOperations(policy.operationTokens())
         readFailures = 0
         if (ready && lastError?.startsWith("control:") == true) lastError = null
         if (ready) {
@@ -330,7 +331,7 @@ object ModuleRuntime : FrameworkCallbacks {
         policy.starting(fact.target.packageName, at)
         val target = CallTarget(fact.target.packageName, fact.component, EntryKind.ACTIVITY)
         val source = fact.source
-        if (source != null && source.packageName != target.packageName && fact.component.isNotBlank()) {
+        if (fact.evidence == null && source != null && operationCaller(source.uid) && source.packageName != target.packageName && fact.component.isNotBlank()) {
             val existing = policy.flowFor(source.packageName, source.token)
             val flow = if (existing != null && policy.extendFlow(existing, source.packageName, target, at)) existing
                 else policy.beginFlow(source.packageName, source.token, target, at, observed = true)
@@ -414,7 +415,7 @@ object ModuleRuntime : FrameworkCallbacks {
         }
         if (!ready || !factsFresh || paused) return EntryDecision(true, "initializing_or_paused")
         var result = policy.entry(userId, target, now(), caller)
-        if (userId == 0 && result.reason != "essential" && caller != null && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
+        if (userId == 0 && result.reason != "essential" && caller != null && operationCaller(caller.uid) && target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER, EntryKind.BROADCAST)) {
             val systemDependency = caller.packageName == target.packageName && policy.systemBound(caller) &&
                 target.kind in setOf(EntryKind.SERVICE, EntryKind.BIND, EntryKind.PROVIDER)
             val flow = policy.flowFor(caller.packageName)
@@ -687,8 +688,9 @@ object ModuleRuntime : FrameworkCallbacks {
         if (eventTimes.size > 4_096) eventTimes.clear()
     }
     private fun rootCause(error: Throwable): Throwable = error.cause?.let { rootCause(it) } ?: error
+    private fun operationCaller(uid: Int): Boolean = uid >= 10000 && uid != facts?.systemUiUid && uid !in facts?.homeUids.orEmpty()
     private fun now() = SystemClock.elapsedRealtime()
     private const val SELF = "io.github.user4ooksk.stopcard"
     private val CORE = setOf("task_add", "task_remove", "user_task_close", "activity", "window_true", "force_stop")
-    private val WAKE = setOf("activity", "service_lookup", "broadcast", "provider", "job", "alarm", "pending_intent", "process")
+    private val WAKE = setOf("activity", "service_lookup", "broadcast", "provider", "job", "alarm", "pending_intent", "ui_process_identity")
 }
