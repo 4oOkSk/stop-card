@@ -14,7 +14,7 @@
 sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
 ```
 
-如果平台目录名是 `android-37.0`，且 `android-37` 不存在，创建兼容链接：
+如果平台目录名是 `android-37.0`，且 `android-37` 路径空缺，创建兼容链接：
 
 ```sh
 ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
@@ -25,11 +25,11 @@ ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
 1. 准备自己的签名密钥，并保存备份。
 2. 将 [keystore.properties.example](../keystore.properties.example) 复制为仓库根目录下的 `keystore.properties`。
 3. 填写密钥路径、别名和密码。
-4. 保持密钥与填写后的配置文件不进入版本控制。
+4. 密钥与填写后的配置文件仅保存在受限本地目录。
 
-构建会把签名证书摘要写入模块。模块用该摘要核验管理 APK。没有配置可信签名时，模块只观察。
+构建会把签名证书摘要写入模块。模块用该摘要核验管理 APK。可信签名配置缺失时，模块只观察。
 
-用于安装验收的 release APK 必须签名。覆盖安装需要与已安装版本使用相同签名；自建密钥不能覆盖官方发布包。
+用于安装验收的 release APK 必须签名。覆盖安装要求与已安装版本使用相同签名；自建密钥签名的包使用独立安装环境。
 
 ## 构建与检查
 
