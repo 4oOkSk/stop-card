@@ -6,6 +6,17 @@ import java.util.concurrent.atomic.AtomicLong
 enum class OpenSource { LAUNCHER, RECENTS, NOTIFICATION, ACTIVITY }
 enum class EntryKind { ACTIVITY, SERVICE, BIND, BROADCAST, PROVIDER, JOB, ALARM, PENDING_INTENT, PROCESS, NOTIFICATION }
 
+enum class ProcessHosting {
+    ACTIVITY, BACKGROUND, UNKNOWN;
+    companion object {
+        fun of(type: String): ProcessHosting = when (type) {
+            "activity", "top-activity", "next-activity", "next-top-activity" -> ACTIVITY
+            "service", "started-service", "bound-service", "broadcast", "content provider", "restart" -> BACKGROUND
+            else -> UNKNOWN
+        }
+    }
+}
+
 data class AppKey(
     val userId: Int,
     val packageName: String,
@@ -56,6 +67,7 @@ data class PermissionView(
     val reasons: Set<String>,
     val stopAt: Long?,
     val running: Boolean = false,
+    val lastActiveAt: Long = 0,
 )
 
 /**
@@ -79,6 +91,7 @@ class PermissionPolicy {
         var running = false
         var observation: Long? = null
         var openedUntil = 0L
+        var lastActiveAt = 0L
         val uncertainTasks = HashSet<TaskKey>()
     }
 
@@ -188,6 +201,7 @@ class PermissionPolicy {
         t.stopped = false
         t.closing = false
         t.restricted = false
+        t.lastActiveAt = now
         t.due = null
         t.observation = null
         t.openedUntil = maxOf(t.openedUntil, now + OPEN_CONFIRM_MS)
@@ -227,6 +241,7 @@ class PermissionPolicy {
         }
         val anyVisible = if (token == null) value else pkg in visibleWindows.values
         if (anyVisible) {
+            if (!t.visible) t.lastActiveAt = now
             invalidate(pkg)
             t.visible = true
             t.stopped = false
@@ -301,7 +316,7 @@ class PermissionPolicy {
             val onScreen = pkg in world.visiblePackages || world.tasks.any { it.key.userId == 0 && pkg in it.visiblePackages }
             if (onScreen != t.visible) {
                 invalidate(pkg)
-                if (onScreen) { t.restricted = false; t.closing = false }
+                if (onScreen) { t.restricted = false; t.closing = false; t.lastActiveAt = now }
             }
             t.visible = onScreen
             if (onScreen) {
@@ -575,6 +590,8 @@ class PermissionPolicy {
     }
 
     fun views(): List<PermissionView> = published.states.values.toList()
+    fun hasCard(app: AppKey): Boolean = published.apps[app.packageName] == app &&
+        published.states[app.packageName]?.let { it.cards > 0 && it.state in setOf("card", "visible") } == true
     fun keepAlive(group: Set<String>): Boolean {
         val p = published
         return p.ready && !p.paused && p.rule.enabled && !p.rule.observe && group.isNotEmpty() &&
@@ -645,7 +662,7 @@ class PermissionPolicy {
                 t.closing -> "pending"
                 else -> "managed"
             }
-            PermissionView(t.app, t.cards.size, t.visible, activeFlows, state, reasons, t.due, t.running)
+            PermissionView(t.app, t.cards.size, t.visible, activeFlows, state, reasons, t.due, t.running, t.lastActiveAt)
         }
         published = Published(rule, ready, paused, apps, states, grants, revisions.toMap(),
             tracks.filterValues { it.restricted }.keys.toSet())

@@ -63,7 +63,15 @@ object ModuleRuntime : FrameworkCallbacks {
     private var appliedGeneration = -1L
     private var runningBaseline = false
     private var lastRunningAt = -5_000L
-    private var protectedPriorities = emptySet<Int>()
+    @Volatile private var protectedPriorities = emptyMap<Int, PriorityGrant>()
+    @Volatile private var prioritySampleAt = 0L
+    private var prioritySessions = emptyMap<AppKey, Long>()
+    private val priorityRefreshPending = HashSet<Int>()
+    private val invalidatedPriorities = ConcurrentHashMap.newKeySet<Int>()
+    @Volatile private var priorityFaulted = false
+    private val processEpochs = ConcurrentHashMap<Int, Long>()
+    private val epochSerial = java.util.concurrent.atomic.AtomicLong()
+    private val wakeRelations = WakeRelations()
     private var world: WorldSnapshot? = null
     private var taskSource = "initializing"
     private var recovery = "not_installed"
@@ -206,13 +214,57 @@ object ModuleRuntime : FrameworkCallbacks {
     }
 
     private fun updatePriorities() {
-        val priority = if (enforcing() && current?.extraKeepAlive == true && adapter.report()["extra_keep_alive"]?.status == "installed")
-            facts?.groups.orEmpty().filterValues(policy::keepAlive).keys else emptySet()
-        if (priority != protectedPriorities) {
-            adapter.recomputePriority()
-            protectedPriorities = priority
+        priorityRefreshPending.addAll(invalidatedPriorities)
+        invalidatedPriorities.removeAll(priorityRefreshPending)
+        val old = protectedPriorities
+        val views = policy.views().filter { it.cards > 0 && it.state in setOf("card", "visible") }
+        val sessions = views.associate { it.app to it.lastActiveAt }
+        val enabled = enforcing() && current?.extraKeepAlive == true && priorityHooksReady()
+        var next = if (enabled) old.filterValues { validPriority(it) } else emptyMap()
+        if (enabled && (sessions != prioritySessions || now() - prioritySampleAt >= 5_000)) {
+            prioritySessions = sessions
+            val inventory = facts!!
+            val candidates = views.map { it.app }.filter { inventory.groups[it.uid]?.size == 1 }.associateBy { it.packageName }
+            val processes = adapter.priorityProcesses(candidates).take(64).mapNotNull { process ->
+                val epoch = processEpochs[process.pid] ?: 0
+                val rss = runCatching {
+                    File("/proc/${process.pid}/status").useLines { lines ->
+                        lines.firstOrNull { it.startsWith("VmRSS:") }?.substringAfter(':')?.trim()?.substringBefore(' ')?.toLongOrNull()
+                    }
+                }.getOrNull() ?: return@mapNotNull null
+                if (epoch != (processEpochs[process.pid] ?: 0)) null else process.copy(rssKb = rss, epoch = epoch)
+            }
+            val memory = android.app.ActivityManager.MemoryInfo()
+            context!!.getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(memory)
+            next = KeepAlivePolicy.select(views, processes,
+                MemoryPressure(memory.totalMem / 1024, memory.availMem / 1024, memory.threshold / 1024, memory.lowMemory))
+            prioritySampleAt = now()
+        }
+        if (!enabled) prioritySessions = emptyMap()
+        protectedPriorities = next
+        val changed = (old.keys + next.keys).filterTo(HashSet()) { pid ->
+            old[pid]?.let { it.adj to it.process.epoch } != next[pid]?.let { it.adj to it.process.epoch }
+        }
+        priorityRefreshPending.addAll(changed)
+        if (priorityRefreshPending.isNotEmpty()) {
+            try {
+                adapter.recomputePriority(priorityRefreshPending)
+                priorityRefreshPending.clear()
+            } catch (error: Throwable) {
+                // A native refresh may have completed only part of the set. Withdraw every
+                // grant, retain all affected PIDs and retry their native values on later ticks.
+                priorityRefreshPending.addAll(old.keys)
+                priorityRefreshPending.addAll(next.keys)
+                protectedPriorities = emptyMap()
+                priorityFaulted = true
+                throw error
+            }
         }
     }
+
+    private fun priorityHooksReady() = !priorityFaulted && adapter.installed("extra_keep_alive") && adapter.installed("cached_retention")
+    private fun validPriority(grant: PriorityGrant): Boolean = facts?.apps?.get(grant.process.app.packageName) == grant.process.app &&
+        (processEpochs[grant.process.pid] ?: 0) == grant.process.epoch && policy.hasCard(grant.process.app)
 
     private fun readConfig() {
         val text = store.control(ModuleProtocol.CONFIG)
@@ -261,6 +313,7 @@ object ModuleRuntime : FrameworkCallbacks {
         channelReady = BuildConfig.MODULE_SIGNER_SHA256.isNotEmpty() &&
             inventory.apps[SELF]?.let { it.userId == 0 && it.uid >= 10000 && it.signer == BuildConfig.MODULE_SIGNER_SHA256 } == true
         facts = inventory
+        wakeRelations.retain(inventory.apps)
         policy.setApps(inventory.apps.values, now())
         adapter.identities(inventory.launcherUids, inventory.systemUiUid, inventory.providers)
         lastInventoryAt = now()
@@ -435,7 +488,7 @@ object ModuleRuntime : FrameworkCallbacks {
             policy.reviewLater(target.packageName, now())
             wake()
         }
-        recordDecision(target, result)
+        recordDecision(target, result, caller)
         // A notification from the target itself proves running state. A proxy notification does
         // not prove that the target process is alive, and cannot start an initialization sweep.
         if (result.wouldBlock && target.kind == EntryKind.NOTIFICATION && facts?.apps?.get(target.packageName)?.uid == sourceUid) {
@@ -481,13 +534,41 @@ object ModuleRuntime : FrameworkCallbacks {
         wake()
     }
 
-    override fun keepAlive(uid: Int): Boolean {
-        if (!enforcing() || current?.extraKeepAlive != true) return false
-        val group = facts?.groups?.get(uid) ?: return false
-        return uid >= 10000 && policy.keepAlive(group)
+    override fun priority(pid: Int, uid: Int, nativeAdj: Int): Int {
+        if (nativeAdj !in 900..999 || !enforcing() || current?.extraKeepAlive != true ||
+            now() - prioritySampleAt !in 0..10_000 || !priorityHooksReady()) return nativeAdj
+        val grant = protectedPriorities[pid]?.takeIf { it.process.app.uid == uid && validPriority(it) }
+        return KeepAlivePolicy.adjust(nativeAdj, grant)
     }
 
-    override fun processStarted(packageName: String, uid: Int) {
+    override fun processChanged(pid: Int) {
+        if (pid <= 0) return
+        processEpochs[pid] = epochSerial.incrementAndGet()
+        if (processEpochs.size > 4096) {
+            invalidatedPriorities.addAll(protectedPriorities.keys)
+            protectedPriorities = emptyMap()
+            processEpochs.clear()
+            wake()
+        }
+    }
+
+    override fun processStart(packageName: String, uid: Int, processName: String, hostingType: String,
+        component: String?, sourceUid: Int, sourcePackage: String?): EntryDecision {
+        val hosting = ProcessHosting.of(hostingType)
+        if (hosting == ProcessHosting.ACTIVITY)
+            return EntryDecision(true, "android_activity")
+        val inventory = facts ?: return EntryDecision(true, "unknown_identity")
+        val identity = inventory.apps[packageName]?.takeIf { it.uid == uid } ?: return EntryDecision(true, "unknown_identity")
+        if (processName.isBlank() || hosting != ProcessHosting.BACKGROUND)
+            return EntryDecision(true, "unknown_hosting")
+        // A native process can host several packages. One permitted member prevents a partial veto.
+        if (inventory.groups[uid].orEmpty().any { it != packageName &&
+                (it in inventory.essential || inventory.apps[it]?.let(policy::hasSession) == true || !policy.isRestricted(it)) })
+            return EntryDecision(true, "shared_uid_protected")
+        return entry(identity.userId, CallTarget(packageName, component, EntryKind.PROCESS), sourceUid, sourcePackage)
+    }
+
+    override fun processStarted(packageName: String, uid: Int, pid: Int) {
         if (uid / 100000 != 0) return
         val review = ready
         fun observedStart() {
@@ -572,7 +653,7 @@ object ModuleRuntime : FrameworkCallbacks {
             flows = policy.flowDetails(),
             recovery = recovery,
             commandResults = commandResults.entries.toList().takeLast(8).associate { it.key to it.value.take(2048) },
-            extraKeepAlive = enforcing() && c?.extraKeepAlive == true && hooks["extra_keep_alive"]?.status == "installed",
+            extraKeepAlive = enforcing() && c?.extraKeepAlive == true && priorityHooksReady(),
             diagnosticDetails = buildMap {
                 put("framework", "LSPosed legacy API; scoped system_server")
                 put("framework_version", runCatching { de.robv.android.xposed.XposedBridge.getXposedVersion().toString() }.getOrDefault("unknown"))
@@ -580,6 +661,13 @@ object ModuleRuntime : FrameworkCallbacks {
                 put("platform", "Android ${Build.VERSION.RELEASE}; API ${Build.VERSION.SDK_INT}")
                 put("validation", "runtime signatures; device behavior requires acceptance tests")
                 put("observations", observations.toString())
+                put("keep_alive", protectedPriorities.values.joinToString("\n") {
+                    "${it.process.app.packageName}; pid=${it.process.pid}; lmkd_adj=${it.adj}; rss_kb=${it.process.rssKb}"
+                })
+                put("keep_alive_refresh", if (priorityFaulted) "disabled after native refresh failure; pending=${priorityRefreshPending.size}" else "ready")
+                put("wake_relations", wakeRelations.views().take(32).joinToString("\n") {
+                    "${it.key.source.packageName} -> ${it.key.target.packageName}; ${it.key.kind}; attempts=${it.attempts}; denied=${it.denied}; ${it.key.component.orEmpty()}"
+                })
                 hooks.forEach { (name, hook) -> put(name, hook.methods.joinToString("\n").take(4096)) }
             },
         )
@@ -677,8 +765,13 @@ object ModuleRuntime : FrameworkCallbacks {
         wake()
         return true
     }
-    private fun recordDecision(target: CallTarget, result: EntryDecision) {
-        if (result.wouldBlock) logLimited(target.packageName, if (result.allow || !enforcing()) "observe" else "blocked", "${target.kind.name.lowercase()}:${result.reason}")
+    private fun recordDecision(target: CallTarget, result: EntryDecision, caller: AppKey?) {
+        val closed = policy.isRestricted(target.packageName)
+        if (closed && caller != null && caller.uid >= 10000) facts?.apps?.get(target.packageName)?.let {
+            wakeRelations.record(caller, it, target, !result.allow && enforcing(), now())
+        }
+        if (result.wouldBlock) logLimited(target.packageName, if (result.allow || !enforcing()) "observe" else "blocked",
+            "${target.kind.name.lowercase()}:${result.reason}; from=${caller?.packageName ?: "unknown_or_system"}; component=${target.component.orEmpty()}")
     }
     private fun logLimited(pkg: String, reason: String, detail: String) {
         val key = "$pkg:$reason:${detail.substringBefore(':')}"

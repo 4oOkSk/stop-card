@@ -84,7 +84,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                         GroupDivider()
                         SettingSwitch("观察模式", "仅记录，不拦截或停止应用。", current.observeOnly, viewModel::setObserveOnly)
                         GroupDivider()
-                        SettingSwitch("减少有卡应用回收", "降低缓存进程被回收的概率。", current.extraKeepAlive) { on ->
+                        SettingSwitch("减少有卡应用回收", "优先保留最近使用的有卡应用，内存紧张时自动减弱。", current.extraKeepAlive) { on ->
                             viewModel.update { it.copy(extraKeepAlive = on) }
                         }
                     }

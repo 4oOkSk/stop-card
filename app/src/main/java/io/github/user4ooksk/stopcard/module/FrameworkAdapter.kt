@@ -45,8 +45,11 @@ interface FrameworkCallbacks {
     fun component(token: String, source: String?, target: CallTarget, added: Boolean)
     fun fault(capability: String, cause: Throwable)
     fun stopGuard(packageName: String): Boolean
-    fun keepAlive(uid: Int): Boolean
-    fun processStarted(packageName: String, uid: Int)
+    fun priority(pid: Int, uid: Int, nativeAdj: Int): Int
+    fun processChanged(pid: Int)
+    fun processStarted(packageName: String, uid: Int, pid: Int)
+    fun processStart(packageName: String, uid: Int, processName: String, hostingType: String,
+        component: String?, sourceUid: Int, sourcePackage: String?): EntryDecision
 }
 
 /**
@@ -64,6 +67,10 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     private val pendingObserved = ThreadLocal<Boolean?>()
     private val pendingCaller = ThreadLocal<ActivityFact?>()
     private val serviceCalls = ThreadLocal<ServiceCall?>()
+    private data class ProcessOrigin(val target: String, val component: String?, val uid: Int, val source: String?)
+    private val processOrigins = ThreadLocal<ProcessOrigin?>()
+    private val modernProcess = runCatching { Class.forName("com.android.server.am.psc.ProcessRecordInternal", false, loader) }.getOrNull()
+    private var nativePrioritySetter: Method? = null
     private val systemUiProcesses = ConcurrentHashMap<Int, Int>()
     private data class BroadcastOrigin(val caller: ActivityFact, val evidence: OpenSource?, val observed: Boolean)
     private val broadcastOrigins = java.util.WeakHashMap<Any, BroadcastOrigin>()
@@ -80,6 +87,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     @Volatile private var notificationIntents = emptySet<String>()
 
     fun report(): Map<String, HookCapability> = capabilities.toSortedMap()
+    fun installed(name: String): Boolean = capabilities[name]?.status == "installed"
 
     fun bootComplete(): Boolean {
         // sys.boot_completed survives a system_server restart. Never initialize context services
@@ -540,17 +548,53 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     }
 
     private fun processHooks() {
+        hook("process_service_origin", "com.android.server.am.ActiveServices", "bringUpServiceLocked", {
+            it.returnType == String::class.java && names(it) == listOf("com.android.server.am.ServiceRecord", "int",
+                "boolean", "boolean", "boolean", "boolean", "boolean", "int")
+        }, before = { p ->
+            val record = p.args[0]
+            val component = field(record, "name") as ComponentName
+            processOrigins.set(ProcessOrigin(component.packageName, component.flattenToString(),
+                field(record, "mRecentCallingUid") as Int, field(record, "mRecentCallingPackage") as? String))
+        })
+        hook("process_broadcast_origin", "com.android.server.am.BroadcastQueueImpl", "scheduleReceiverColdLocked", {
+            it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("com.android.server.am.BroadcastProcessQueue")
+        }, before = { p ->
+            val queue = p.args[0]
+            val record = call(queue, "getActive") ?: return@hook
+            val receiver = (field(record, "receivers") as List<*>)[call(queue, "getActiveIndex") as Int]
+            val info = (receiver as? android.content.pm.ResolveInfo)?.activityInfo ?: return@hook
+            processOrigins.set(ProcessOrigin(info.packageName, ComponentName(info.packageName, info.name).flattenToString(),
+                field(record, "callingUid") as Int, field(record, "callerPackage") as? String))
+        })
+        hook("process_start", "com.android.server.am.ProcessList", "startProcessLocked", {
+            it.returnType.name == "com.android.server.am.ProcessRecord" && names(it) == listOf(
+                "java.lang.String", "android.content.pm.ApplicationInfo", "boolean", "int", "com.android.server.am.HostingRecord",
+                "int", "boolean", "boolean", "int", "boolean", "int", "java.lang.String", "java.lang.String", "java.lang.String",
+                "[Ljava.lang.String;", "java.lang.Runnable")
+        }, before = { p ->
+            val info = p.args[1] as ApplicationInfo
+            if (info.uid / 100000 != 0 || p.args[7] == true || p.args[9] == true) return@hook
+            val hosting = p.args[4] ?: return@hook
+            val type = call(hosting, "getType") as String
+            val origin = processOrigins.get()?.takeIf { it.target == info.packageName }
+            val decision = sink.processStart(info.packageName, info.uid, p.args[0] as String, type,
+                origin?.component, origin?.uid ?: Binder.getCallingUid(), origin?.source)
+            if (!decision.allow) p.result = null // Native failure before ProcessRecord creation or Zygote work.
+        })
         hook("ui_process_identity", "com.android.server.am.ProcessRecord", "setPid", {
             it.returnType == Void.TYPE && names(it) == listOf("int")
         }, before = { p ->
             val previous = call(p.thisObject, "getPid") as Int
+            sink.processChanged(previous)
+            sink.processChanged(p.args[0] as Int)
             systemUiProcesses.remove(previous)
             systemUiProcesses.remove(p.args[0] as Int)
         }, after = { p ->
             if (p.hasThrowable()) return@hook
             val info = field(p.thisObject, "info") as ApplicationInfo
             val pid = p.args[0] as Int
-            if (pid > 0) sink.processStarted(info.packageName, info.uid)
+            if (pid > 0) sink.processStarted(info.packageName, info.uid, pid)
             if (pid > 0 && info.packageName == "com.android.systemui" && field(p.thisObject, "processName") == "com.android.systemui") {
                 systemUiProcesses[pid] = info.uid
             }
@@ -568,34 +612,70 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     }
 
     private fun keepAliveHooks() {
-        if (runCatching { Class.forName("com.android.server.am.psc.ProcessRecordInternal", false, loader) }.isSuccess) {
-            // The small setter can be inlined. Adjust the final computed value immediately
-            // before Android applies it, retaining native batching, observers and LMKD updates.
-            hook("extra_keep_alive", "com.android.server.am.psc.OomAdjuster", "applyOomAdjLSP", {
-                it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.psc.ProcessRecordInternal", "boolean")
-            }, before = { p ->
-                val app = p.args[0]
-                val adj = call(app, "getCurAdj") as Int
-                if (adj in 900..999 && sink.keepAlive(field(app, "uid") as Int)) call(app, "setCurAdj", 900)
-            })
-            return
-        }
-        hook("extra_keep_alive", "com.android.server.am.ProcessStateRecord", "setCurAdj", {
-            it.returnType == Void.TYPE && names(it) == listOf("int")
+        nativePrioritySetter = runCatching {
+            Class.forName("com.android.server.am.ProcessList", false, loader).getDeclaredMethod("setOomAdj",
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+                .also { require(it.returnType == Void.TYPE && java.lang.reflect.Modifier.isStatic(it.modifiers)); it.isAccessible = true }
+        }.getOrElse { unavailable("extra_keep_alive", it); return }
+        hook("extra_keep_alive", "com.android.server.am.ProcessList", "writeLmkd", {
+            it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("java.nio.ByteBuffer", "java.nio.ByteBuffer")
         }, before = { p ->
-            val adj = p.args[0] as Int
-            if (adj < 900 || adj > 999) return@hook
-            val app = field(p.thisObject, "mApp") ?: return@hook
+            LmkdPriority.rewrite(p.args[0] as java.nio.ByteBuffer, sink::priority)?.let { p.args[0] = it }
+        })
+        val cachedReasons = runCatching {
+            listOf("SUBREASON_TOO_MANY_CACHED", "SUBREASON_TOO_MANY_EMPTY", "SUBREASON_TRIM_EMPTY")
+                .mapTo(HashSet()) { android.app.ApplicationExitInfo::class.java.getDeclaredField(it).apply { isAccessible = true }.getInt(null) }
+        }.getOrElse { unavailable("cached_retention", it); return }
+        hook("cached_retention", "com.android.server.am.ProcessRecord", "killLocked", {
+            it.returnType == Void.TYPE && names(it) == listOf("java.lang.String", "java.lang.String", "int", "int",
+                "android.app.ApplicationExitInfo\$AnrInfo", "boolean", "boolean")
+        }, before = { p ->
+            if (p.args[2] != android.app.ApplicationExitInfo.REASON_OTHER || p.args[3] !in cachedReasons) return@hook
+            val app = p.thisObject
+            val pid = call(app, "getPid") as Int
             val uid = field(app, "uid") as Int
-            // Stay in Android's cached band. Never promote to foreground/persistent priority.
-            if (sink.keepAlive(uid)) p.args[0] = 900
+            if (sink.priority(pid, uid, 900) < 900) p.result = null
         })
     }
 
-    /** Worker only. Use Android's ordinary OOM pass when a cached-priority grant changes. */
-    fun recomputePriority() {
-        val service = ams ?: return
-        synchronized(service) { call(service, "updateOomAdjLocked", 0) }
+    /** Worker only. Resend native priorities to LMKD without changing cached/freezer state. */
+    fun recomputePriority(changedPids: Set<Int> = emptySet()) {
+        val service = checkNotNull(ams) { "Process service unavailable" }
+        val setter = checkNotNull(nativePrioritySetter) { "Native priority setter unavailable" }
+        synchronized(service) {
+            synchronized(field(service, "mProcLock")!!) {
+                for (record in processRecords(service)) {
+                    val pid = call(record, "getPid") as Int
+                    if (pid > 0 && pid in changedPids) setter.invoke(null, pid, field(record, "uid") as Int,
+                        call(processState(record), "getCurAdj") as Int, false)
+                }
+            }
+        }
+    }
+
+    private fun processState(record: Any): Any = if (modernProcess?.isInstance(record) == true) record else field(record, "mState")!!
+    private fun processRecords(service: Any): List<Any> {
+        val list = field(field(service, "mProcessList")!!, "mLruProcesses") as List<*>
+        require(list.size <= 4096)
+        return list.filterNotNull()
+    }
+
+    /** Worker-only process identity snapshot. RSS reads happen after releasing native locks. */
+    fun priorityProcesses(apps: Map<String, AppKey>): List<PriorityProcess> {
+        val service = ams ?: return emptyList()
+        return synchronized(service) {
+            synchronized(field(service, "mProcLock")!!) {
+                processRecords(service).mapNotNull { record ->
+                    val info = field(record, "info") as ApplicationInfo
+                    val app = apps[info.packageName]?.takeIf { it.uid == info.uid } ?: return@mapNotNull null
+                    val pid = call(record, "getPid") as Int
+                    val processName = field(record, "processName") as String
+                    val shownUi = call(processState(record), if (modernProcess != null) "getHasShownUi" else "hasShownUi") == true
+                    if (pid <= 0 || field(record, "uid") != app.uid || (!shownUi && processName != info.processName)) null
+                    else PriorityProcess(app, pid, processName, 0)
+                }.groupBy { it.app }.values.mapNotNull { group -> group.singleOrNull() }
+            }
+        }
     }
 
     fun runningPackages(): Set<String> {
@@ -784,6 +864,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     // Save context even when a capability was disabled by an earlier invocation.
                     // The paired finally must restore an enclosing call's exact provenance.
                     when {
+                        capability in PROCESS_ORIGINS -> param.setObjectExtra("stopcard.processOrigin", processOrigins.get())
                         capability.endsWith("_context") -> param.setObjectExtra("stopcard.previous", serviceCalls.get())
                         capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
                             param.setObjectExtra("stopcard.previous", launchSource.get())
@@ -800,6 +881,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                         // Restore provenance even if a capability disabled itself during entry.
                         // Nested service/PI calls must not leave trust on the Binder thread.
                         when {
+                            capability in PROCESS_ORIGINS -> processOrigins.set(param.getObjectExtra("stopcard.processOrigin") as? ProcessOrigin)
                             capability.endsWith("_context") -> serviceCalls.set(param.getObjectExtra("stopcard.previous") as? ServiceCall)
                             capability == "pending_intent" || capability == "recents_open" || capability == "shortcut_open" -> {
                                 launchSource.set(param.getObjectExtra("stopcard.previous") as? OpenSource)
@@ -877,6 +959,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     }
 
     private companion object {
+        val PROCESS_ORIGINS = setOf("process_service_origin", "process_broadcast_origin")
         val WIDGET_ACTIONS = setOf(
             "android.appwidget.action.APPWIDGET_ENABLED", "android.appwidget.action.APPWIDGET_UPDATE",
             "android.appwidget.action.APPWIDGET_ENABLE_AND_UPDATE", "android.appwidget.action.APPWIDGET_OPTIONS_CHANGED",

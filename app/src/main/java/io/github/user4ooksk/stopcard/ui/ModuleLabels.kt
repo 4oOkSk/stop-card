@@ -27,7 +27,10 @@ fun capabilityLabel(key: String): String = when (key) {
     "job" -> "任务调度"
     "alarm" -> "闹钟交付"
     "pending_intent" -> "延迟操作"
-    "process" -> "进程启动"
+    "process", "process_start" -> "进程启动前检查"
+    "process_service_origin" -> "服务启动来源"
+    "process_broadcast_origin" -> "冷广播启动来源"
+    "cached_retention" -> "有卡进程留存"
     "extra_keep_alive" -> "减少有卡应用回收"
     else -> when {
         key.startsWith("stop_") -> "停止前会话复核"
