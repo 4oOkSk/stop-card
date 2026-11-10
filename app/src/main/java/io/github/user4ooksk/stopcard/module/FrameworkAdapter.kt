@@ -104,11 +104,17 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         providers = authorities
     }
 
-    fun install() {
+    /** Constructors only publish service references; boot must not run policy callbacks. */
+    fun captureServices() {
         capture("ActivityTaskManagerService") { atm = it }
         capture("RecentTasks") { recent = it }
         captureClass("com.android.server.am.ActivityManagerService", "system_ready") { ams = it }
         captureClass("com.android.server.notification.NotificationManagerService", "notification_service") { nms = it }
+    }
+
+    /** Called by the control worker after this system_server completes its boot phases. */
+    fun install() {
+        if (capabilities["system_ready"] == null) captureServices()
         taskHooks()
         systemIntegrationHooks()
         activityHooks()

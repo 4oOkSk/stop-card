@@ -95,10 +95,7 @@ object ModuleRuntime : FrameworkCallbacks {
         // The independent recovery marker is read before any enforcement hook is installed.
         paused = store.paused()
         adapter = FrameworkAdapter(loader, boot, this)
-        if (!paused && boot.isNotBlank()) {
-            adapter.install()
-            hooksInstalled = true
-        }
+        if (!paused && boot.isNotBlank()) adapter.captureServices()
         val worker = HandlerThread("stop-card-control").apply { start() }
         handler = Handler(worker.looper).also { it.post(loop) }
         store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("status", "starting").toString())
@@ -121,31 +118,39 @@ object ModuleRuntime : FrameworkCallbacks {
 
     private val loop = object : Runnable {
         override fun run() {
-            try { tick() }
-            catch (e: Throwable) {
-                if (readFailures == 0) android.util.Log.e("StopCard", "Control loop failed", e)
-                ready = false
-                factsFresh = false
-                policy.unknown(now())
-                lastError = "control:${rootCause(e).javaClass.simpleName}"
-                readFailures++
-                if (readFailures >= 3) recovery = "control_failures"
-            } finally {
-                lastProgress = now()
-                runCatching { updatePriorities() }.onFailure { lastError = "priority:${it.javaClass.simpleName}" }
-                store.maintenance(now())
-                runCatching { state() }
-                store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("elapsed", now())
-                    .put("status", when {
-                        readFailures >= 3 -> "failed"
-                        paused -> "paused"
-                        current == null -> "waiting_configuration"
-                        ready -> "ready"
-                        else -> "observing"
-                    }).toString())
+            guardModule(::controlFailed) {
+                try { tick() }
+                catch (e: Throwable) { controlFailed(e) }
+                finally {
+                    lastProgress = now()
+                    runCatching { updatePriorities() }.onFailure { lastError = "priority:${it.javaClass.simpleName}" }
+                    store.maintenance(now())
+                    runCatching { state() }
+                    store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("elapsed", now())
+                        .put("status", when {
+                            readFailures >= 3 -> "failed"
+                            paused -> "paused"
+                            current == null -> "waiting_configuration"
+                            ready -> "ready"
+                            else -> "observing"
+                        }).toString())
+                }
+            }
+            guardModule(::controlFailed) {
                 handler?.postDelayed(this, if (paused) 1_000 else 500)
             }
         }
+    }
+
+    private fun controlFailed(error: Throwable) {
+        val report = readFailures == 0
+        ready = false
+        factsFresh = false
+        lastError = "control:${error.javaClass.simpleName}"
+        readFailures++
+        if (readFailures >= 3) recovery = "control_failures"
+        policy.unknown(now())
+        if (report) android.util.Log.e("StopCard", "Control loop failed", error)
     }
 
     private fun tick() {

@@ -127,7 +127,7 @@ class ModuleStore(private val fault: (String) -> Unit) {
 
     private fun submit(rejected: () -> Unit = {}, action: () -> Unit) {
         try {
-            io.execute { try { action() } catch (e: Exception) { fault("storage:${e.javaClass.simpleName}") } }
+            io.execute { guardModule({ fault("storage:${it.javaClass.simpleName}") }, action) }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             fault("storage:queue_full")
             rejected()
