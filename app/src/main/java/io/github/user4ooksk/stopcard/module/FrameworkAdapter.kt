@@ -150,22 +150,21 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("task_remove", "com.android.server.wm.RecentTasks", "remove", {
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.wm.Task")
         }, before = { p ->
-            val t = taskFact(p.args[0], recent)
-            if (t.key.userId == 0) sink.removed(t.key, t.owner, false)
+            removalFact(p.args[0])?.let { sink.removed(it.task, it.owner, false) }
             sink.wake()
         })
         hook("user_task_close", "com.android.server.wm.ActivityTaskSupervisor", "removeTask", {
             it.returnType == Void.TYPE && names(it).take(4) == listOf("com.android.server.wm.Task", "boolean", "boolean", "java.lang.String") &&
                 (it.parameterCount == 4 || names(it).drop(4) == listOf("int", "int", "java.lang.String"))
         }, before = { p ->
-            val t = taskFact(p.args[0], recent)
+            val t = removalFact(p.args[0]) ?: run { sink.wake(); return@hook }
             val reason = p.args[3] as String
             // The permission-checked removal route is explicit even after Binder identity is
             // cleared. AppTask.finishAndRemoveTask uses a different native reason and does not
             // request process killing; trimming and display cleanup also have separate reasons.
             if (explicitTaskRemoval(p.args[2] == true, reason)) {
-                sink.taskClosed(TaskCloseFact(t.key, t.owner))
-            } else sink.removed(t.key, t.owner, false)
+                sink.taskClosed(t)
+            } else sink.removed(t.task, t.owner, false)
         })
         hook("recents_open", "com.android.server.wm.ActivityTaskSupervisor", "startActivityFromRecents", {
             it.returnType == Int::class.javaPrimitiveType && names(it).take(3) == listOf("int", "int", "int")
@@ -823,12 +822,24 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         }
     }
 
+    // Removal also visits organizer/root containers and tasks whose activities are already gone.
+    // These are not necessarily app cards. Read only identity, never traverse their teardown state.
+    internal fun removalFact(task: Any): TaskCloseFact? {
+        val user = field(task, "mUserId") as Int
+        if (user != 0) return null
+        val owner = taskOwner(task) ?: return null
+        return TaskCloseFact(TaskKey(user, field(task, "mTaskId") as Int, boot), owner)
+    }
+
+    private fun taskOwner(task: Any): String? =
+        (field(task, "realActivity") as? ComponentName)?.packageName
+            ?: (call(task, "getBaseIntent") as? Intent)?.component?.packageName
+
     private fun taskFact(task: Any, recents: Any?): TaskFact {
         val id = field(task, "mTaskId") as Int
         val user = field(task, "mUserId") as Int
         val intent = call(task, "getBaseIntent") as? Intent
-        val owner = (field(task, "realActivity") as? ComponentName)?.packageName
-            ?: intent?.component?.packageName ?: error("Task has no owner")
+        val owner = taskOwner(task) ?: error("Task has no owner")
         val participants = HashSet<String>()
         val visible = HashSet<String>()
         var count = 0
@@ -907,7 +918,9 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         try { action() }
         catch (e: Throwable) {
             disabled += capability
-            capabilities[capability] = HookCapability("degraded", detail = e.javaClass.simpleName)
+            val previous = capabilities[capability]
+            capabilities[capability] = HookCapability("degraded", previous?.methods.orEmpty(),
+                detail = "${e.javaClass.simpleName}: ${e.message.orEmpty().take(160)}")
             sink.fault(capability, e)
         }
     }

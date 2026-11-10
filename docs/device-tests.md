@@ -54,6 +54,8 @@ adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager
 
 补充检查：留卡并息屏 30 分钟；划卡后立即重开；在复核期间暂停。重开和暂停必须使旧停止任务失效。
 
+使用分屏或气泡后退出，再移除一张专用测试应用卡片。核对系统容器清理前后 `task_remove`、`user_task_close` 均保持 `installed`，模块仍就绪，测试应用的关闭判断正常。
+
 ## 检查跨应用操作
 
 1. 从桌面打开 A，再通过按钮进入 B 的操作页面。
