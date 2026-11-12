@@ -61,8 +61,8 @@ import io.github.user4ooksk.stopcard.ui.activity.ActivityViewModel.Filter
 import io.github.user4ooksk.stopcard.ui.components.AppIcon
 import io.github.user4ooksk.stopcard.ui.components.StopEmblem
 import io.github.user4ooksk.stopcard.ui.dayLabel
+import io.github.user4ooksk.stopcard.ui.eventSummary
 import io.github.user4ooksk.stopcard.ui.graphViewModel
-import io.github.user4ooksk.stopcard.ui.reasonLabel
 import io.github.user4ooksk.stopcard.ui.timeOfDay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -150,8 +150,8 @@ fun ActivityScreen(contentPadding: PaddingValues, darkTheme: Boolean) {
                                     when (option) {
                                         Filter.ALL -> "全部"
                                         Filter.CARD -> "划卡停止"
+                                        Filter.BLOCKED -> "后台拦截"
                                         Filter.OBSERVE -> "观察"
-                                        Filter.VISIBLE -> "退出使用"
                                         Filter.MANUAL -> "手动"
                                     }
                                 )
@@ -163,6 +163,16 @@ fun ActivityScreen(contentPadding: PaddingValues, darkTheme: Boolean) {
                             },
                         )
                     }
+                }
+            }
+            if (state.days.isEmpty()) {
+                item(key = "empty-filter") {
+                    Text(
+                        "当前筛选下暂无记录",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 32.dp),
+                    )
                 }
             }
             for (day in state.days) {
@@ -183,7 +193,7 @@ fun ActivityScreen(contentPadding: PaddingValues, darkTheme: Boolean) {
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         leadingContent = { AppIcon(row.event.packageName, size = 40.dp) },
                         headlineContent = { Text(row.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        supportingContent = { Text(reasonLabel(row.event.reason)) },
+                        supportingContent = { Text(eventSummary(row.event), maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         trailingContent = {
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(

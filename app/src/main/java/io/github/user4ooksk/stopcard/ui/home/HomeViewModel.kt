@@ -24,7 +24,9 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
         /** elapsedRealtime at which the module stops it, or null. */
         val stopsAt: Long?,
         val state: String = "managed",
-    )
+    ) {
+        val canStop: Boolean get() = !inUse && state in setOf("card", "managed", "pending")
+    }
 
     data class Recent(val event: StopEvent, val label: String)
 
@@ -47,8 +49,14 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
         graph.module.state,
     ) { apps, rules, settings, recent, module ->
         val polledAt = SystemClock.elapsedRealtime()
+        val selfPackage = graph.context.packageName
         val moduleApps = (module as? ModuleClient.State.Connected)?.module?.apps.orEmpty()
-        val running = moduleApps
+        val managedApps = moduleApps.filter { app ->
+            app.packageName != selfPackage &&
+                app.state !in setOf("essential", "exception") &&
+                apps[app.packageName]?.isSystem != true
+        }
+        val running = managedApps
             .filter { it.running }
             .map { app ->
                 Running(
@@ -60,27 +68,29 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
                     state = app.state,
                 )
             }
-            .sortedWith(compareBy({ it.stopsAt == null }, { it.stopsAt }))
+            .sortedWith(compareBy({ it.stopsAt == null }, { it.stopsAt }, { !it.inUse }, { -it.cards }, { (it.app?.label ?: it.packageName).lowercase() }))
         State(
             blockedCount = apps.values.count {
-                !it.isSystem && it.packageName != graph.context.packageName && !(rules[it.packageName]?.exempt == true && rules[it.packageName]?.identity == it.identity)
+                !it.isSystem && it.packageName != selfPackage && !(rules[it.packageName]?.exempt == true && rules[it.packageName]?.identity == it.identity)
             },
             running = running,
             recent = recent.map { Recent(it, apps[it.packageName]?.label ?: it.packageName) },
-            cards = moduleApps.sumOf { it.cards },
-            operations = moduleApps.count { it.state == "operation" },
-            stopped = moduleApps.count { it.stopped },
+            cards = managedApps.sumOf { it.cards },
+            operations = managedApps.count { it.state == "operation" },
+            stopped = managedApps.count { it.stopped },
             observeOnly = (module as? ModuleClient.State.Connected)?.module?.observeOnly ?: settings.observeOnly,
             module = module,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), State())
 
     fun stopNow(packageName: String) {
-        viewModelScope.launch { graph.module.stopNow(listOf(packageName)) }
+        viewModelScope.launch { graph.stopNow(listOf(packageName)) }
     }
 
     fun stopAll() {
-        viewModelScope.launch { graph.module.stopAllCards() }
+        val targets = state.value.running.filter { it.canStop }.map { it.packageName }
+        if (targets.isEmpty()) return
+        viewModelScope.launch { graph.stopNow(targets) }
     }
 
     private companion object {

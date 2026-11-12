@@ -18,7 +18,7 @@ class OnboardingViewModel(private val graph: AppGraph) : ViewModel() {
 
     val module: StateFlow<ModuleClient.State> = graph.module.state
 
-    val rootAvailable: Boolean get() = graph.module.rootAvailable()
+    val rootAvailable: StateFlow<Boolean> = graph.module.rootAvailable
 
     fun next() {
         _step.value = when (_step.value) {
@@ -46,6 +46,9 @@ class OnboardingViewModel(private val graph: AppGraph) : ViewModel() {
         viewModelScope.launch {
             graph.settings.update {
                 it.copy(onboarded = true, protectionEnabled = true, observeOnly = observeOnly)
+            }
+            if ((graph.module.state.value as? ModuleClient.State.Connected)?.module?.emergencyDisabled != true) {
+                graph.module.setPaused(false)
             }
             graph.module.refresh()
         }

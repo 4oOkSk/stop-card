@@ -210,7 +210,10 @@ class ModuleProtocolTest {
     @Test fun `state preserves capability failures flow and command outcomes`() {
         val state = ModuleProtocol.ModuleState(ready = true, bootId = "boot", hooks = mapOf("provider" to "degraded:signature"),
             flows = listOf("12:com.example.a:active"), commandResults = mapOf("42" to "{\"com.example.a\":\"protected\"}"),
-            essentialReasons = mapOf("com.example.keyboard" to setOf("input_method")), diagnosticDetails = mapOf("rom" to "test/rom"))
+            essentialReasons = mapOf("com.example.keyboard" to setOf("input_method")),
+            emergencyDisabled = true, diagnosticDetails = mapOf("rom" to "test/rom", "emergency_disabled" to "manual_emergency_disable"))
         assertEquals(state, ModuleProtocol.ModuleState.fromJson(state.toJson()))
+        val legacyJson = JSONObject(state.toJson()).apply { remove("emergencyDisabled") }.toString()
+        assertEquals(false, ModuleProtocol.ModuleState.fromJson(legacyJson)!!.emergencyDisabled)
     }
 }

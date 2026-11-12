@@ -57,8 +57,8 @@ import io.github.user4ooksk.stopcard.ui.components.GroupDivider
 import io.github.user4ooksk.stopcard.ui.components.SectionHeader
 import io.github.user4ooksk.stopcard.ui.components.StatusCard
 import io.github.user4ooksk.stopcard.ui.countdownLabel
+import io.github.user4ooksk.stopcard.ui.eventSummary
 import io.github.user4ooksk.stopcard.ui.graphViewModel
-import io.github.user4ooksk.stopcard.ui.reasonLabel
 import io.github.user4ooksk.stopcard.ui.relativeTime
 import kotlinx.coroutines.delay
 
@@ -67,6 +67,7 @@ fun HomeScreen(
     main: MainViewModel,
     contentPadding: PaddingValues,
     onOpenActivity: () -> Unit,
+    onOpenRecovery: () -> Unit = {},
 ) {
     val viewModel = graphViewModel { HomeViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -97,6 +98,7 @@ fun HomeScreen(
                 onPause = { main.setProtectionEnabled(false) },
                 onResume = { main.setProtectionEnabled(true) },
                 onRetry = main::refresh,
+                onOpenRecovery = onOpenRecovery,
             )
         }
         item(key = "capability") {
@@ -127,7 +129,7 @@ fun HomeScreen(
             item(key = "running-header") {
                 SectionHeader(
                     stringResource(R.string.home_running),
-                    action = if (state.running.any { !it.inUse }) stringResource(R.string.action_stop_all) else null,
+                    action = if (protection.isEnforcing && state.running.any { it.canStop }) stringResource(R.string.action_stop_all) else null,
                     onAction = viewModel::stopAll,
                 )
             }
@@ -144,7 +146,12 @@ fun HomeScreen(
                         }
                         state.running.forEachIndexed { index, running ->
                             if (index > 0) GroupDivider()
-                            RunningRow(running, now, onStop = { viewModel.stopNow(running.packageName) })
+                            RunningRow(
+                                running = running,
+                                now = now,
+                                enforcing = protection.isEnforcing,
+                                onStop = { viewModel.stopNow(running.packageName) },
+                            )
                         }
                     }
                 }
@@ -162,14 +169,19 @@ fun HomeScreen(
                 if (state.recent.isEmpty()) {
                     EmptyRow(stringResource(R.string.home_recent_empty), Icons.Rounded.Bedtime)
                 } else {
-                    val now = System.currentTimeMillis()
+                    val now by produceState(System.currentTimeMillis()) {
+                        while (true) {
+                            delay(30_000)
+                            value = System.currentTimeMillis()
+                        }
+                    }
                     state.recent.forEachIndexed { index, recent ->
                         if (index > 0) GroupDivider()
                         ListItem(
                             colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
                             leadingContent = { AppIcon(recent.event.packageName, size = 40.dp) },
                             headlineContent = { Text(recent.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text(reasonLabel(recent.event.reason)) },
+                            supportingContent = { Text(eventSummary(recent.event), maxLines = 2, overflow = TextOverflow.Ellipsis) },
                             trailingContent = {
                                 Text(
                                     relativeTime(recent.event.time, now),
@@ -213,7 +225,7 @@ private fun StatTile(value: Int, label: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> Unit) {
+private fun RunningRow(running: HomeViewModel.Running, now: Long, enforcing: Boolean, onStop: () -> Unit) {
     val status = when {
         running.inUse -> stringResource(R.string.running_in_use)
         running.stopsAt != null && running.stopsAt > now -> stringResource(R.string.running_stops_in, countdownLabel(running.stopsAt - now))
@@ -222,7 +234,7 @@ private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> 
         running.state == "operation" -> "临时运行"
         running.state == "opening" -> "正在打开"
         running.state == "uncertain" -> "状态待确认"
-        else -> stringResource(R.string.running_in_use)
+        else -> stringResource(R.string.running_background)
     }
     ListItem(
         colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
@@ -234,7 +246,7 @@ private fun RunningRow(running: HomeViewModel.Running, now: Long, onStop: () -> 
             Text(status, color = if (running.inUse) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
         },
         trailingContent = {
-            IconButton(onClick = onStop, enabled = !running.inUse && running.state !in setOf("operation", "opening", "uncertain")) {
+            IconButton(onClick = onStop, enabled = enforcing && running.canStop) {
                 Icon(Icons.Rounded.Block, contentDescription = stringResource(R.string.action_stop_now))
             }
         },

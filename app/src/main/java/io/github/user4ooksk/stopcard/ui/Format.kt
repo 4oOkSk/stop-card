@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import io.github.user4ooksk.stopcard.R
+import io.github.user4ooksk.stopcard.model.StopEvent
 import io.github.user4ooksk.stopcard.model.StopReason
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -34,8 +35,33 @@ fun reasonLabel(reason: StopReason): String = when (reason) {
     StopReason.OBSERVE -> "观察：本来会停止"
     StopReason.ERROR -> "状态或执行错误"
     StopReason.REVIEW -> "等待复核"
-    StopReason.BLOCKED -> "已拦截或未执行"
+    StopReason.BLOCKED -> "已拦截后台唤醒"
     StopReason.CANCELED -> "复核取消"
+}
+
+@Composable
+fun eventSummary(event: StopEvent): String = when (event.reason) {
+    StopReason.OBSERVE -> if ("closed_background" in event.detail) "观察：本来会拦截后台唤醒" else "观察：本来会停止"
+    StopReason.BLOCKED -> when {
+        event.detail == "shared_uid_or_role" -> "共享进程或角色保护，未停止"
+        else -> {
+            val kind = when (event.detail.substringBefore(':')) {
+                "process" -> "进程启动"
+                "service" -> "服务启动"
+                "bind" -> "服务绑定"
+                "broadcast" -> "广播唤醒"
+                "provider" -> "内容提供器"
+                "job" -> "计划任务"
+                "alarm" -> "闹钟唤醒"
+                "notification" -> "通知入队"
+                else -> "后台唤醒"
+            }
+            val caller = event.detail.substringAfter("from=", "").substringBefore(';').trim()
+            if (caller.isNotBlank() && caller != "unknown_or_system") "已拦截$kind · 来自 $caller" else "已拦截$kind"
+        }
+    }
+    StopReason.ERROR -> if (event.detail.isNotBlank()) "状态或执行错误 · ${event.detail.take(80)}" else "状态或执行错误"
+    else -> reasonLabel(event.reason)
 }
 
 @Composable

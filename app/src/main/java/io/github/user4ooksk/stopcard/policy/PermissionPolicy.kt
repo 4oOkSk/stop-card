@@ -433,12 +433,18 @@ class PermissionPolicy {
         return true
     }
 
-    @Synchronized fun unbind(token: String, now: Long) {
+    @Synchronized fun unbind(token: String, now: Long): Boolean {
+        var changed = false
         flows.values.forEach { f ->
-            if (f.bindings.remove(token) != null) f.reviewAt = now + rule.hiddenReviewMs
+            if (f.bindings.remove(token) != null) {
+                f.reviewAt = now + rule.hiddenReviewMs
+                changed = true
+            }
         }
+        if (!changed) return false
         reviewFlows(now)
         publish(now)
+        return true
     }
 
     @Synchronized fun finishFlow(id: Long, now: Long) {
@@ -449,13 +455,17 @@ class PermissionPolicy {
         publish(now)
     }
 
-    @Synchronized fun sourceActivityRemoved(token: String, now: Long) {
+    @Synchronized fun sourceActivityRemoved(token: String, now: Long): Boolean {
+        var changed = false
         for (flow in flows.values) if (flow.activity == token) {
             flow.finished = true
             flow.reviewAt = now + rule.hiddenReviewMs
+            changed = true
         }
+        if (!changed) return false
         reviewFlows(now)
         publish(now)
+        return true
     }
 
     /** Visible work stays protected. Hidden operations use lifecycle completion or a short fallback. */
@@ -598,6 +608,8 @@ class PermissionPolicy {
             group.all { p.states[it]?.let { v -> v.cards > 0 || v.visible || v.flows > 0 } == true }
     }
     fun liveFlowIds(): Set<Long> = synchronized(this) { flows.keys.toSet() }
+    @Synchronized fun hasPendingWork(): Boolean =
+        tracks.values.any { it.due != null || it.openedUntil > lastNow } || flows.isNotEmpty()
     fun operationTokens(): Set<String> = synchronized(this) {
         flows.values.flatMapTo(HashSet()) { it.activities + it.bindings.keys }
     }

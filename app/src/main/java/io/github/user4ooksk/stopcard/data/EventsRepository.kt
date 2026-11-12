@@ -48,7 +48,7 @@ class EventsRepository(context: Context, private val dao: EventDao) {
     }
 
     suspend fun clear() {
-        clearedUpTo = latestId()
+        clearedUpTo = maxOf(latestId(), System.currentTimeMillis())
         dao.deleteAll()
     }
 

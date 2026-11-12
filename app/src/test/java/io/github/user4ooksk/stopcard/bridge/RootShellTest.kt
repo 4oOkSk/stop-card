@@ -142,6 +142,19 @@ class RootShellTest {
         assertFalse(config.parentFile.listFiles()!!.any { it.name.endsWith(".tmp") })
     }
 
+    @Test
+    fun `large command output drains cleanly past cap without sigpipe`() {
+        val proc = ProcessBuilder("sh", "-c", "awk 'BEGIN { for (i = 0; i < 10000; i++) printf \"%040d\\n\", i }'").start()
+        val output = StringBuffer()
+        val reader = Thread {
+            proc.inputStream.bufferedReader().use { stream -> root.drainStream(stream, output, 256 * 1024) }
+        }.apply { start() }
+        assertTrue(proc.waitFor(5, TimeUnit.SECONDS))
+        reader.join(1_000)
+        assertEquals(0, proc.exitValue())
+        assertEquals(256 * 1024, output.length)
+    }
+
     private fun write(text: String, expected: String?) = finish(startWrite(text, expected))
 
     private fun startWrite(text: String, expected: String?): Process {

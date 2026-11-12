@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +44,7 @@ fun OnboardingScreen() {
     val viewModel = graphViewModel { OnboardingViewModel(it) }
     val step by viewModel.step.collectAsStateWithLifecycle()
     val module by viewModel.module.collectAsStateWithLifecycle()
+    val hasRoot by viewModel.rootAvailable.collectAsStateWithLifecycle()
     var observeOnly by remember { mutableStateOf(true) }
 
     BackHandler { viewModel.back() }
@@ -50,6 +53,8 @@ fun OnboardingScreen() {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -62,15 +67,15 @@ fun OnboardingScreen() {
         )
         when (step) {
             OnboardingViewModel.Step.WELCOME -> Welcome()
-            OnboardingViewModel.Step.SETUP -> Setup(module = module, rootAvailable = viewModel.rootAvailable, onRefresh = viewModel::refresh)
+            OnboardingViewModel.Step.SETUP -> Setup(module = module, rootAvailable = hasRoot, onRefresh = viewModel::refresh)
             OnboardingViewModel.Step.READY -> Ready(observeOnly = observeOnly, onObserveChange = { observeOnly = it })
         }
         Spacer(Modifier.height(24.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (step != OnboardingViewModel.Step.WELCOME) {
                 TextButton(onClick = { viewModel.back() }) { Text("上一步") }
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.weight(1f))
             if (step == OnboardingViewModel.Step.READY) {
                 Button(onClick = { viewModel.finish(observeOnly) }) { Text("开始") }
             } else {
@@ -157,7 +162,7 @@ private fun StatusRow(title: String, ok: Boolean, detail: String) {
         }
         Spacer(Modifier.width(10.dp))
         Text(title, style = MaterialTheme.typography.bodyLarge)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.width(12.dp))
         Text(
             detail,
             style = MaterialTheme.typography.bodySmall,

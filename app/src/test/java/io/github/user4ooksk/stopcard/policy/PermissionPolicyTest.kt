@@ -381,4 +381,19 @@ class PermissionPolicyTest {
         assertFalse(p.keepAlive(group)); p.beginFlow(a.packageName, null, target(b), 150)
         assertTrue(p.keepAlive(group)); p.pause(true, 151); assertFalse(p.keepAlive(group))
     }
+
+    @Test fun unrelatedUnbindAndActivityFinishDoNotMutateFlowsWhilePendingWorkTracksDeadlines() {
+        val p = policy()
+        assertFalse(p.hasPendingWork())
+        assertFalse(p.unbind("unrelated-conn", 50))
+        assertFalse(p.sourceActivityRemoved("unrelated-activity", 51))
+        val service = target(b, EntryKind.BIND)
+        val flow = p.beginFlow(a.packageName, "source-act", service, 100)!!
+        assertTrue(p.hasPendingWork())
+        assertTrue(p.bind(flow, "real-conn", service, 101, a))
+        assertFalse(p.unbind("unrelated-conn", 102))
+        assertTrue(p.sourceActivityRemoved("source-act", 103))
+        assertTrue(p.unbind("real-conn", 104))
+        assertFalse(p.hasPendingWork())
+    }
 }

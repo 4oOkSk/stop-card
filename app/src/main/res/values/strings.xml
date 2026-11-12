@@ -22,6 +22,7 @@
     <string name="home_running">正在运行</string>
     <string name="home_running_empty">暂无运行应用</string>
     <string name="running_in_use">正在使用</string>
+    <string name="running_background">无卡后台运行</string>
     <string name="running_stops_in">%1$s 后停止</string>
     <string name="running_stopping">正在停止…</string>
     <string name="home_recent">最近记录</string>

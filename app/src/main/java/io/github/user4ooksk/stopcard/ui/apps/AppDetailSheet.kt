@@ -56,7 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.user4ooksk.stopcard.R
 import io.github.user4ooksk.stopcard.graph
-import io.github.user4ooksk.stopcard.ui.reasonLabel
+import io.github.user4ooksk.stopcard.ui.eventSummary
 import io.github.user4ooksk.stopcard.ui.relativeTime
 import io.github.user4ooksk.stopcard.model.isStop
 import io.github.user4ooksk.stopcard.ui.startOfDay
@@ -65,6 +65,7 @@ import io.github.user4ooksk.stopcard.ui.startOfDay
 @Composable
 fun AppDetailSheet(
     item: AppsViewModel.Item,
+    enforcing: Boolean,
     viewModel: AppsViewModel,
     onDismiss: () -> Unit,
 ) {
@@ -165,7 +166,7 @@ fun AppDetailSheet(
                 Spacer(Modifier.height(8.dp))
                 for (event in history.take(5)) {
                     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                        Text(reasonLabel(event.reason), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Text(eventSummary(event), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                         Text(
                             relativeTime(event.time, now),
                             style = MaterialTheme.typography.bodyMedium,
@@ -184,6 +185,7 @@ fun AppDetailSheet(
                 if (!item.isProtected) {
                     FilledTonalButton(
                         onClick = { viewModel.stopNow(packageName) },
+                        enabled = enforcing && item.canStopNow,
                         contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
                     ) {
                         Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -209,9 +211,11 @@ fun AppDetailSheet(
                 }
                 OutlinedButton(
                     onClick = {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
-                        )
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+                            )
+                        }
                     },
                     contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
                 ) {

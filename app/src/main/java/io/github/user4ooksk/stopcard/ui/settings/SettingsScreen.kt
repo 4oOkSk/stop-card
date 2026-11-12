@@ -22,11 +22,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -43,9 +45,15 @@ import io.github.user4ooksk.stopcard.ui.components.GroupDivider
 import io.github.user4ooksk.stopcard.ui.components.SectionHeader
 import io.github.user4ooksk.stopcard.ui.graphViewModel
 import io.github.user4ooksk.stopcard.ui.moduleProblem
+import io.github.user4ooksk.stopcard.ui.recoveryLabel
+import io.github.user4ooksk.stopcard.ui.taskSourceLabel
 
 @Composable
-fun SettingsScreen(contentPadding: PaddingValues) {
+fun SettingsScreen(
+    contentPadding: PaddingValues,
+    initialPage: String = "设置",
+    onPageChange: (String) -> Unit = {},
+) {
     val viewModel = graphViewModel { SettingsViewModel(it) }
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val module by viewModel.module.collectAsStateWithLifecycle()
@@ -53,7 +61,14 @@ fun SettingsScreen(contentPadding: PaddingValues) {
     val maintenance by viewModel.maintenance.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val current = settings ?: return
-    var page by rememberSaveable { mutableStateOf("设置") }
+    var page by rememberSaveable { mutableStateOf(initialPage) }
+    LaunchedEffect(initialPage) {
+        if (page != initialPage) page = initialPage
+    }
+    fun navigate(target: String) {
+        page = target
+        onPageChange(target)
+    }
     var showTechnical by rememberSaveable { mutableStateOf(false) }
     var recoveryAction by remember { mutableStateOf<String?>(null) }
     var diagnostics by remember { mutableStateOf<String?>(null) }
@@ -61,7 +76,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
     val context = LocalContext.current
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val listState = remember(page) { LazyListState() }
-    BackHandler(page != "设置") { page = "设置" }
+    BackHandler(page != "设置") { navigate("设置") }
 
     LazyColumn(
         state = listState,
@@ -70,8 +85,8 @@ fun SettingsScreen(contentPadding: PaddingValues) {
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         item(key = "$page-title") {
-            Row {
-                if (page != "设置") TextButton(onClick = { page = "设置" }) { Text("返回") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (page != "设置") TextButton(onClick = { navigate("设置") }) { Text("返回") }
                 Text(page, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(8.dp))
             }
         }
@@ -133,9 +148,9 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                         GroupDivider()
                         ActionRow("清除全部例外", null, "清除", onClick = { confirmReset = true })
                         GroupDivider()
-                        ActionRow("诊断", null, "查看", onClick = { page = "诊断"; showTechnical = false })
+                        ActionRow("诊断", null, "查看", onClick = { navigate("诊断"); showTechnical = false })
                         GroupDivider()
-                        ActionRow("故障恢复", null, "查看", onClick = { page = "故障恢复" })
+                        ActionRow("故障恢复", null, "查看", onClick = { navigate("故障恢复") })
                     }
                 }
                 item { SectionHeader("关于") }
@@ -153,6 +168,25 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                         ModuleSummary(module)
                         ActionRow("技术信息", null, if (showTechnical) "收起" else "展开", onClick = { showTechnical = !showTechnical })
                         ActionRow("完整诊断", null, "查看", onClick = { viewModel.diagnostics { diagnostics = it } })
+                    }
+                }
+                val connected = (module as? ModuleClient.State.Connected)?.module
+                if (connected != null) {
+                    val keepAlive = connected.diagnosticDetails["keep_alive"].orEmpty().trim()
+                    val wakeRelations = connected.diagnosticDetails["wake_relations"].orEmpty().trim()
+                    if (keepAlive.isNotEmpty() || wakeRelations.isNotEmpty()) {
+                        item { SectionHeader("运行保护与唤醒来源") }
+                        item {
+                            GroupCard {
+                                if (keepAlive.isNotEmpty()) {
+                                    RowMessage("有卡保活保护", keepAlive)
+                                    if (wakeRelations.isNotEmpty()) GroupDivider()
+                                }
+                                if (wakeRelations.isNotEmpty()) {
+                                    RowMessage("最近后台唤醒", wakeRelations)
+                                }
+                            }
+                        }
                     }
                 }
                 if (showTechnical) item {
@@ -206,7 +240,7 @@ fun SettingsScreen(contentPadding: PaddingValues) {
                     type = "text/plain"
                     putExtra(android.content.Intent.EXTRA_TEXT, text)
                 }
-                context.startActivity(android.content.Intent.createChooser(share, "导出诊断"))
+                runCatching { context.startActivity(android.content.Intent.createChooser(share, "导出诊断")) }
             }) { Text("导出") } },
         )
     }
@@ -249,6 +283,7 @@ private fun ModuleSummary(module: ModuleClient.State) {
         is ModuleClient.State.Connected -> {
             val m = module.module
             when {
+                m.emergencyDisabled -> RowMessage("已锁定暂停", "请在“故障恢复”中检查状态并解除锁定。")
                 !m.configLoaded -> RowMessage("等待配置", "请完成引导或重新打开应用。")
                 m.paused -> RowMessage("已暂停")
                 !m.ready -> RowMessage("模块未就绪", moduleProblem(m.lastError))
@@ -266,13 +301,16 @@ private fun ModuleRows(module: ModuleClient.State) {
     val m = module.module
     RowMessage("系统模块", "PID ${m.pid} · UID ${m.uid} · SDK ${m.sdk} · 配置代次 ${m.configGeneration}")
     RowMessage("能力", "卡片：${capabilityStatus(m.cardControl)} · 通知：${capabilityStatus(m.notificationControl)} · 后台入口：${capabilityStatus(m.wakeControl)}")
-    RowMessage("恢复辅助", m.recovery)
+    RowMessage("恢复辅助", recoveryLabel(m.recovery))
+    m.diagnosticDetails["emergency_disabled"]?.takeIf { it.isNotBlank() }?.let {
+        RowMessage("锁定标记", it)
+    }
     m.hooks.forEach { (key, status) ->
         RowMessage(capabilityLabel(key), capabilityStatus(status) + if (':' in status) " · ${status.substringAfter(':')}" else "")
     }
     if (m.flows.isNotEmpty()) RowMessage("操作链", m.flows.joinToString("\n"))
     if (m.commandResults.isNotEmpty()) RowMessage("命令回执", m.commandResults.entries.toList().takeLast(5).joinToString("\n") { "${it.key}: ${it.value}" })
-    RowMessage("任务来源", m.taskSource)
+    RowMessage("任务来源", taskSourceLabel(m.taskSource))
     m.lastError?.let { RowMessage("错误", it) }
 }
 

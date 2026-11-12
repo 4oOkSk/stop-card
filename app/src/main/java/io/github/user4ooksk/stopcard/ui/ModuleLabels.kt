@@ -2,9 +2,14 @@ package io.github.user4ooksk.stopcard.ui
 
 fun capabilityLabel(key: String): String = when (key) {
     "activity" -> "页面启动状态"
+    "task_add" -> "最近任务新增"
     "task_remove" -> "划卡与任务移除"
     "force_stop" -> "系统原生强停"
     "user_task_close" -> "最近任务移除"
+    "capture_ActivityTaskManagerService" -> "任务管理服务采集"
+    "capture_RecentTasks" -> "最近任务列表采集"
+    "system_ready" -> "活动管理服务采集"
+    "notification_service" -> "通知管理服务采集"
     "ui_process_identity" -> "系统界面进程身份"
     "role_changes" -> "系统角色变更"
     "fact_changes" -> "安装、设置和网络变更"
@@ -68,4 +73,19 @@ fun reasonLabel(code: String): String = when (code) {
     "google_service" -> "Google 基础服务"
     "webview" -> "当前 WebView"
     else -> code
+}
+
+fun recoveryLabel(value: String): String = when (value) {
+    "watching" -> "监控运行中"
+    "not_installed" -> "未安装"
+    "stale_or_paused" -> "未运行或已暂停"
+    "control_failures" -> "连续控制异常"
+    else -> "不可用"
+}
+
+fun taskSourceLabel(value: String): String = when (value) {
+    "ok" -> "正常"
+    "booting" -> "系统启动中"
+    "initializing" -> "初始化中"
+    else -> "待确认"
 }

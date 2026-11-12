@@ -47,6 +47,7 @@ object ModuleRuntime : FrameworkCallbacks {
     @Volatile private var current: ModuleProtocol.Config? = null
     @Volatile private var ready = false
     @Volatile private var paused = true
+    @Volatile private var emergencyReason: String? = null
     @Volatile private var lastError: String? = null
     @Volatile private var channelReady = false
     @Volatile private var lastProgress = 0L
@@ -57,7 +58,12 @@ object ModuleRuntime : FrameworkCallbacks {
     private var systemFacts: SystemFacts? = null
     private var boot = ""
     private var lastInventoryAt = 0L
-    private var lastStateAt = 0L
+    private var lastStateAt = -10_000L
+    private var lastStateSnapshot: ModuleProtocol.ModuleState? = null
+    private var lastReadyAt = -10_000L
+    private var lastReadyStatus: String? = null
+    private var lastConfigReadAt = -10_000L
+    private var configDirty = true
     private var lastConfigText: String? = null
     private var acceptedConfig: ModuleProtocol.Config? = null
     private var appliedGeneration = -1L
@@ -85,6 +91,7 @@ object ModuleRuntime : FrameworkCallbacks {
     private var packageWatchReady = false
     private var networkWatchReady = false
     private var controlObserver: FileObserver? = null
+    private var commandObserver: FileObserver? = null
     private val watchedSettings = HashSet<String>()
     private val factObserversReady: Boolean get() = controlObserver != null && packageWatchReady && networkWatchReady && watchedSettings.containsAll(SystemFacts.WATCHED_SETTINGS)
 
@@ -93,7 +100,8 @@ object ModuleRuntime : FrameworkCallbacks {
         attached = true
         boot = runCatching { File("/proc/sys/kernel/random/boot_id").readText().trim() }.getOrDefault("")
         // The independent recovery marker is read before any enforcement hook is installed.
-        paused = store.paused()
+        emergencyReason = store.emergencyReason()
+        paused = emergencyReason != null || store.paused()
         adapter = FrameworkAdapter(loader, boot, this)
         if (!paused && boot.isNotBlank()) adapter.captureServices()
         val worker = HandlerThread("stop-card-control").apply { start() }
@@ -122,22 +130,29 @@ object ModuleRuntime : FrameworkCallbacks {
                 try { tick() }
                 catch (e: Throwable) { controlFailed(e) }
                 finally {
-                    lastProgress = now()
+                    val elapsed = now()
+                    lastProgress = elapsed
                     runCatching { updatePriorities() }.onFailure { lastError = "priority:${it.javaClass.simpleName}" }
-                    store.maintenance(now())
+                    store.maintenance(elapsed)
                     runCatching { state() }
-                    store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("elapsed", now())
-                        .put("status", when {
-                            readFailures >= 3 -> "failed"
-                            paused -> "paused"
-                            current == null -> "waiting_configuration"
-                            ready -> "ready"
-                            else -> "observing"
-                        }).toString())
+                    val status = when {
+                        readFailures >= 3 -> "failed"
+                        paused -> "paused"
+                        current == null -> "waiting_configuration"
+                        ready -> "ready"
+                        else -> "observing"
+                    }
+                    if (status != lastReadyStatus || elapsed - lastReadyAt >= 3_000) {
+                        lastReadyStatus = status
+                        lastReadyAt = elapsed
+                        store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("elapsed", elapsed)
+                            .put("status", status).toString())
+                    }
                 }
             }
             guardModule(::controlFailed) {
-                handler?.postDelayed(this, if (paused) 1_000 else 500)
+                val delayMs = if (!paused && (!ready || pendingFacts.isNotEmpty() || policy.hasPendingWork())) 500L else 1_500L
+                handler?.postDelayed(this, delayMs)
             }
         }
     }
@@ -155,7 +170,8 @@ object ModuleRuntime : FrameworkCallbacks {
 
     private fun tick() {
         if (!adapter.bootComplete()) {
-            paused = store.paused()
+            emergencyReason = store.emergencyReason()
+            paused = emergencyReason != null || store.paused()
             ready = false
             taskSource = "booting"
             return
@@ -168,16 +184,24 @@ object ModuleRuntime : FrameworkCallbacks {
         }
         if (!factObserversReady && now() - lastWatchAttempt >= 30_000) watchChanges(context!!)
         if (!roleObserverReady && now() - lastRoleAttempt >= 30_000) watchRoles(context!!)
-        paused = store.paused()
+        watchCommandDir()
+        emergencyReason = store.emergencyReason()
+        paused = emergencyReason != null || store.paused()
         policy.pause(paused, now())
+        if (configDirty || controlObserver == null || current == null || now() - lastConfigReadAt >= 5_000) {
+            readConfig()
+        }
+        runCatching { refreshRecovery() }.onFailure { recovery = "unavailable" }
+        if (!factsFresh || now() - lastInventoryAt >= 30_000) refreshFacts()
+        configure()
+        // Populate inventory before installing hooks so post-boot activity bursts do not overflow pendingFacts.
         if (!hooksInstalled && !paused && boot.isNotBlank()) {
             adapter.install()
             hooksInstalled = true
         }
-        readConfig()
-        runCatching { refreshRecovery() }.onFailure { recovery = "unavailable" }
-        if (!factsFresh || now() - lastInventoryAt >= 30_000) refreshFacts()
-        configure()
+        if (factsFresh) {
+            repeat(pendingFacts.size) { pendingFacts.poll()?.invoke() }
+        }
         if (current == null || boot.isBlank()) {
             ready = false
             policy.unknown(now())
@@ -186,7 +210,10 @@ object ModuleRuntime : FrameworkCallbacks {
         adapter.discover()
         if (now() - lastRunningAt >= 5_000) {
             runCatching { policy.running(adapter.runningPackages(), now(), baseline = !runningBaseline) }
-                .onSuccess { runningBaseline = true }
+                .onSuccess {
+                    runningBaseline = true
+                    if (lastError?.startsWith("running:") == true) lastError = null
+                }
                 .onFailure { lastError = "running:${it.javaClass.simpleName}" }
             lastRunningAt = now()
         }
@@ -198,6 +225,7 @@ object ModuleRuntime : FrameworkCallbacks {
             lastError = "task:${e.javaClass.simpleName}"
             return
         }
+        if (lastError?.startsWith("task:") == true) lastError = null
         world = latest
         policy.reconcile(latest, now())
         val liveFlows = policy.liveFlowIds()
@@ -208,7 +236,6 @@ object ModuleRuntime : FrameworkCallbacks {
         appliedGeneration = if (ready && channelReady) current?.configGeneration ?: -1 else -1
         taskSource = if (ready) "ok" else "initializing"
         if (!ready) policy.unknown(now())
-        repeat(pendingFacts.size) { pendingFacts.poll()?.invoke() }
         adapter.reconcileOperations(policy.operationTokens())
         readFailures = 0
         if (ready && lastError?.startsWith("control:") == true) lastError = null
@@ -272,6 +299,8 @@ object ModuleRuntime : FrameworkCallbacks {
         (processEpochs[grant.process.pid] ?: 0) == grant.process.epoch && policy.hasCard(grant.process.app)
 
     private fun readConfig() {
+        lastConfigReadAt = now()
+        configDirty = false
         val text = store.control(ModuleProtocol.CONFIG)
         if (text == lastConfigText && current != null) return
         val parsed = text?.let(ModuleProtocol.Config::fromJson)
@@ -352,7 +381,8 @@ object ModuleRuntime : FrameworkCallbacks {
             // config, pause and in-memory permission; Android owns the force-stop transaction.
             readConfig()
             configure()
-            paused = store.paused()
+            emergencyReason = store.emergencyReason()
+            paused = emergencyReason != null || store.paused()
             policy.pause(paused, now())
             if (systemFacts?.currentIdentity(ticket.app.packageName) != ticket.app || !enforcing()) return "canceled"
             val group = facts?.groups?.get(ticket.app.uid) ?: return "identity_unknown"
@@ -442,12 +472,15 @@ object ModuleRuntime : FrameworkCallbacks {
 
     override fun activityFinished(token: String) {
         if (defer { activityFinished(token) }) return
-        policy.sourceActivityRemoved(token, now())
-        for (flow in activeActivities.remove(token).orEmpty()) {
-            policy.flowActivity(flow, token, false, now())
-            policy.finishFlow(flow, now())
+        val sourceChanged = policy.sourceActivityRemoved(token, now())
+        val flows = activeActivities.remove(token)
+        if (!flows.isNullOrEmpty()) {
+            for (flow in flows) {
+                policy.flowActivity(flow, token, false, now())
+                policy.finishFlow(flow, now())
+            }
         }
-        wake()
+        if (sourceChanged || !flows.isNullOrEmpty()) wake()
     }
 
     override fun entry(userId: Int, target: CallTarget, sourceUid: Int, sourcePackage: String?, evidence: OpenSource?, observed: Boolean, systemEntry: SystemEntry?): EntryDecision {
@@ -505,15 +538,18 @@ object ModuleRuntime : FrameworkCallbacks {
 
     override fun binding(token: String, source: String?, target: CallTarget, added: Boolean) {
         if (defer { binding(token, source, target, added) }) return
-        if (!added) policy.unbind(token, now())
-        else if (source != null) facts?.apps?.get(source)?.let { caller ->
+        if (!added) {
+            if (policy.unbind(token, now())) wake()
+            return
+        }
+        if (source != null) facts?.apps?.get(source)?.let { caller ->
             val existing = policy.flowFor(caller.packageName)
             if (existing != null) policy.dependency(existing, caller.packageName, target, now())
             policy.flowForCall(caller, target)?.let { flow ->
                 if (policy.bind(flow, token, target, now(), caller)) policy.finishFlow(flow, now())
+                wake()
             }
         }
-        wake()
     }
 
     override fun component(token: String, source: String?, target: CallTarget, added: Boolean) {
@@ -625,15 +661,16 @@ object ModuleRuntime : FrameworkCallbacks {
     }
 
     private fun state() {
-        if (now() - lastStateAt < 1_000) return
-        lastStateAt = now()
+        val elapsed = now()
+        if (elapsed - lastStateAt < 250) return
         val c = current
         val view = policy.views()
         val hooks = adapter.report()
+        val emergency = emergencyReason
         val state = ModuleProtocol.ModuleState(
             versionCode = BuildConfig.VERSION_CODE,
             heartbeat = System.currentTimeMillis(),
-            heartbeatElapsed = now(),
+            heartbeatElapsed = elapsed,
             bootId = boot,
             taskSource = taskSource,
             configGeneration = c?.configGeneration ?: -1,
@@ -644,8 +681,11 @@ object ModuleRuntime : FrameworkCallbacks {
             paused = paused || c?.enabled != true,
             lastError = lastError,
             cards = world?.tasks?.filter { it.key.userId == 0 }?.map { ModuleProtocol.Card(it.key.taskId, it.owner, it.visiblePackages.isNotEmpty(), !it.eligible) }.orEmpty(),
-             apps = view.filter { it.running || it.state !in setOf("managed", "essential", "exception") || it.cards > 0 || it.flows > 0 || it.visible }.take(512).map { RunningApp(it.app.packageName, it.cards, it.visible, it.state == "stopped",
-                 it.stopAt?.let { due -> maxOf(0, due - now()) } ?: -1, it.reasons.joinToString(), it.state, running = it.running) },
+            apps = view.filter { it.running || it.state !in setOf("managed", "essential", "exception") || it.cards > 0 || it.flows > 0 || it.visible }
+                .sortedBy { if (it.state == "essential") 1 else 0 }
+                .take(512)
+                .map { RunningApp(it.app.packageName, it.cards, it.visible, it.state == "stopped",
+                    it.stopAt?.let { due -> maxOf(0, due - elapsed) } ?: -1, it.reasons.joinToString(), it.state, running = it.running) },
             stops = stops,
             pid = Process.myPid(), uid = Process.myUid(), sdk = Build.VERSION.SDK_INT,
             cardControl = if (ready) "active" else "degraded",
@@ -659,6 +699,7 @@ object ModuleRuntime : FrameworkCallbacks {
             recovery = recovery,
             commandResults = commandResults.entries.toList().takeLast(8).associate { it.key to it.value.take(2048) },
             extraKeepAlive = enforcing() && c?.extraKeepAlive == true && priorityHooksReady(),
+            emergencyDisabled = emergency != null,
             diagnosticDetails = buildMap {
                 put("framework", "LSPosed legacy API; scoped system_server")
                 put("framework_version", runCatching { de.robv.android.xposed.XposedBridge.getXposedVersion().toString() }.getOrDefault("unknown"))
@@ -666,6 +707,7 @@ object ModuleRuntime : FrameworkCallbacks {
                 put("platform", "Android ${Build.VERSION.RELEASE}; API ${Build.VERSION.SDK_INT}")
                 put("validation", "runtime signatures; device behavior requires acceptance tests")
                 put("observations", observations.toString())
+                if (emergency != null) put("emergency_disabled", emergency)
                 put("keep_alive", protectedPriorities.values.joinToString("\n") {
                     "${it.process.app.packageName}; pid=${it.process.pid}; lmkd_adj=${it.adj}; rss_kb=${it.process.rssKb}"
                 })
@@ -676,7 +718,26 @@ object ModuleRuntime : FrameworkCallbacks {
                 hooks.forEach { (name, hook) -> put(name, hook.methods.joinToString("\n").take(4096)) }
             },
         )
+        val normalized = state.copy(heartbeat = 0, heartbeatElapsed = 0)
+        val heartbeatInterval = if (state.apps.any { it.stopInMs >= 0 }) 1_000L else 3_000L
+        if (normalized == lastStateSnapshot && elapsed - lastStateAt < heartbeatInterval) return
+        lastStateSnapshot = normalized
+        lastStateAt = elapsed
         store.state(state.toTransportJson())
+    }
+
+    private fun watchCommandDir() {
+        if (commandObserver != null || !File(ModuleProtocol.COMMAND_DIR).isDirectory) return
+        runCatching {
+            @Suppress("DEPRECATION")
+            val observer = object : FileObserver(ModuleProtocol.COMMAND_DIR, FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) {
+                override fun onEvent(event: Int, path: String?) {
+                    if (path?.endsWith(".json") == true) wake()
+                }
+            }
+            observer.startWatching()
+            commandObserver = observer
+        }
     }
 
     private fun watchChanges(ctx: Context) {
@@ -689,7 +750,8 @@ object ModuleRuntime : FrameworkCallbacks {
             @Suppress("DEPRECATION")
             val observer = object : FileObserver(ModuleProtocol.DIR, FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.DELETE or FileObserver.MOVED_FROM or FileObserver.CLOSE_WRITE) {
                 override fun onEvent(event: Int, path: String?) {
-                    if (path == "config.json") { ready = false; wake() }
+                    if (path == "config.json") { configDirty = true; ready = false; wake() }
+                    if (path == "commands") wake()
                     if (path == "paused" || path == "emergency_disabled") {
                         if (event and (CREATE or MOVED_TO or CLOSE_WRITE) != 0) {
                             paused = true
@@ -732,6 +794,10 @@ object ModuleRuntime : FrameworkCallbacks {
             }, h)
             networkWatchReady = true
         }.onFailure { lastError = "network_observer:${it.javaClass.simpleName}" }
+        if (factObserversReady && lastError?.let {
+            it.startsWith("control_observer:") || it.startsWith("package_observer:") ||
+                it.startsWith("settings_observer:") || it.startsWith("network_observer:")
+        } == true) lastError = null
     }
 
     private fun watchRoles(ctx: Context) {
@@ -756,6 +822,7 @@ object ModuleRuntime : FrameworkCallbacks {
                 .invoke(manager, java.util.concurrent.Executor { it.run() }, observer, all)
             roleObserver = observer
             roleObserverReady = true
+            if (lastError?.startsWith("role_observer:") == true) lastError = null
         }.onFailure { roleObserverReady = false; lastError = "role_observer:${rootCause(it).javaClass.simpleName}" }
     }
 

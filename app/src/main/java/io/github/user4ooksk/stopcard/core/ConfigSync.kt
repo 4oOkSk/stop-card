@@ -57,20 +57,22 @@ class ConfigSync(
                         // The pause flag is independent. ConfigSync must never remove it; only the
                         // explicit resume action in AppGraph.setProtectionEnabled can do that.
                         desired = base
-                        module.expectConfiguration()
                         applyDesired()
                     }
                 }
         }
-        // Retry the latest desired document until the module reports that it loaded it. One
-        // mutex keeps the collect path and this retry path from writing out of order.
+        // Retry failed or unacknowledged writes while active; never spawn background root shells.
         scope.launch {
             while (true) {
                 delay(10_000)
+                if (!module.isActive()) continue
                 writeMutex.withLock {
                     val target = desired ?: return@withLock
-                    val applied = (module.state.value as? ModuleClient.State.Connected)?.module?.appliedGeneration
-                    if (applied != target.configGeneration) applyDesired()
+                    val sync = module.synchronization.value
+                    val connected = (module.state.value as? ModuleClient.State.Connected)?.module
+                    val needsWrite = target.configGeneration == 0L || sync.error != null ||
+                        (connected != null && (!connected.configLoaded || connected.configGeneration < target.configGeneration))
+                    if (needsWrite) applyDesired()
                 }
             }
         }

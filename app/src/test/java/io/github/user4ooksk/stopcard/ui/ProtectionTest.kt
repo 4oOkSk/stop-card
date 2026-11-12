@@ -20,4 +20,19 @@ class ProtectionTest {
         assertTrue(Protection.of(settings, ModuleClient.State.Connected(core.copy(ready = false))) is Protection.Degraded)
         assertEquals(Protection.Observe, Protection.of(settings, ModuleClient.State.Connected(core.copy(observeOnly = true))))
     }
+
+    @Test fun `emergency lock and module degradation are never masked by pending sync`() {
+        val pending = ModuleClient.Synchronization(pending = true, generation = 9)
+        assertTrue(Protection.of(settings, ModuleClient.State.Connected(core.copy(ready = false)), pending) is Protection.Degraded)
+        assertEquals(
+            Protection.EmergencyPaused("manual_emergency_disable"),
+            Protection.of(
+                settings,
+                ModuleClient.State.Connected(
+                    core.copy(paused = true, emergencyDisabled = true, diagnosticDetails = mapOf("emergency_disabled" to "manual_emergency_disable")),
+                ),
+                pending,
+            ),
+        )
+    }
 }

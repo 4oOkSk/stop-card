@@ -10,8 +10,11 @@ import kotlinx.coroutines.CancellationException
 import io.github.user4ooksk.stopcard.model.AppRule
 import io.github.user4ooksk.stopcard.model.InstalledApp
 import io.github.user4ooksk.stopcard.model.RuleMode
+import io.github.user4ooksk.stopcard.ui.Protection
 import io.github.user4ooksk.stopcard.ui.daysBefore
 import io.github.user4ooksk.stopcard.ui.dayStarts
+import java.text.Collator
+import java.util.Locale
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,6 +45,8 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         /** True when the global rule applies; an ALLOW row or a system role exempts it. */
         val managed: Boolean get() = !isProtected && rule?.exempt != true
         val exempt: Boolean get() = !isProtected && rule?.exempt == true
+        val canStopNow: Boolean get() = statusKnown && !isProtected && !exempt && !visible &&
+            state in setOf("card", "managed", "pending") && (running || cards > 0)
     }
 
     data class State(
@@ -51,6 +56,7 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
         val all: Map<String, Item> = emptyMap(),
         val counts: Map<Filter, Int> = emptyMap(),
         val showSystem: Boolean = false,
+        val enforcing: Boolean = false,
     )
 
     val query = MutableStateFlow("")
@@ -86,13 +92,18 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
             val q = query.trim()
             all.filter { it.app.label.contains(q, ignoreCase = true) || it.app.packageName.contains(q, ignoreCase = true) }
         }
+        val collator = Collator.getInstance(Locale.getDefault())
+        val enforcing = Protection.of(settings, module, graph.module.synchronization.value).isEnforcing
         State(
             loading = false,
             all = all.associateBy { it.app.packageName },
             items = matching.filter { it.matches(filter) }
-                .sortedWith(compareByDescending<Item> { it.cards > 0 }.thenBy { it.app.label.lowercase() }),
+                .sortedWith(compareByDescending<Item> { it.cards > 0 }
+                    .thenBy(collator) { it.app.label }
+                    .thenBy { it.app.packageName }),
             counts = Filter.entries.associateWith { f -> matching.count { it.matches(f) } },
             showSystem = settings.showSystemApps,
+            enforcing = enforcing,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), State())
 
@@ -149,7 +160,10 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun stopNow(packageName: String) {
-        viewModelScope.launch { graph.module.stopNow(listOf(packageName)) }
+        viewModelScope.launch {
+            val ok = graph.stopNow(listOf(packageName))
+            notice.value = Notice(if (ok) "已发送停止请求" else "当前模式或应用状态不允许停止")
+        }
     }
 
     fun history(packageName: String) = graph.events.forPackage(packageName, HISTORY_LIMIT)

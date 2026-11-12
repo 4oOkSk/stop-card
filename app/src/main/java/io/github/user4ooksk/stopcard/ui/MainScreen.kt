@@ -48,6 +48,7 @@ fun MainScreen(
     darkTheme: Boolean,
 ) {
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var settingsPage by rememberSaveable { mutableStateOf("设置") }
 
     BackHandler(enabled = tab != Tab.HOME) { tab = Tab.HOME }
 
@@ -58,7 +59,10 @@ fun MainScreen(
                 for (item in Tab.entries) {
                     NavigationBarItem(
                         selected = tab == item,
-                        onClick = { tab = item },
+                        onClick = {
+                            if (item == Tab.SETTINGS && tab != Tab.SETTINGS) settingsPage = "设置"
+                            tab = item
+                        },
                         icon = { Icon(if (tab == item) item.selectedIcon else item.icon, contentDescription = null) },
                         label = { Text(stringResource(item.label)) },
                     )
@@ -72,10 +76,15 @@ fun MainScreen(
             label = "tab",
         ) { current ->
             when (current) {
-                Tab.HOME -> HomeScreen(main = main, contentPadding = padding, onOpenActivity = { tab = Tab.ACTIVITY })
+                Tab.HOME -> HomeScreen(
+                    main = main,
+                    contentPadding = padding,
+                    onOpenActivity = { tab = Tab.ACTIVITY },
+                    onOpenRecovery = { settingsPage = "故障恢复"; tab = Tab.SETTINGS },
+                )
                 Tab.APPS -> AppsScreen(contentPadding = padding)
                 Tab.ACTIVITY -> ActivityScreen(contentPadding = padding, darkTheme = darkTheme)
-                Tab.SETTINGS -> SettingsScreen(contentPadding = padding)
+                Tab.SETTINGS -> SettingsScreen(contentPadding = padding, initialPage = settingsPage, onPageChange = { settingsPage = it })
             }
         }
     }

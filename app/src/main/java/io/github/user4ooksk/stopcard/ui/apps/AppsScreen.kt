@@ -209,6 +209,7 @@ fun AppsScreen(contentPadding: PaddingValues) {
     if (selectedItem != null) {
         AppDetailSheet(
             item = selectedItem,
+            enforcing = state.enforcing,
             viewModel = viewModel,
             onDismiss = { selected = null },
         )

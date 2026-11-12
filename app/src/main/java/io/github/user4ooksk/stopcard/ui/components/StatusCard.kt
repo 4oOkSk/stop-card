@@ -42,6 +42,7 @@ fun StatusCard(
     onResume: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenRecovery: () -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val (container, content) = when (protection) {
@@ -49,7 +50,7 @@ fun StatusCard(
         Protection.Observe -> colors.tertiaryContainer to colors.onTertiaryContainer
         Protection.Starting, Protection.NotConfigured, Protection.Paused ->
             colors.surfaceContainerHigh to colors.onSurface
-        Protection.RootMissing, Protection.ModuleMissing, is Protection.Failed, is Protection.Degraded ->
+        is Protection.EmergencyPaused, Protection.RootMissing, Protection.ModuleMissing, is Protection.Failed, is Protection.Degraded ->
             colors.errorContainer to colors.onErrorContainer
     }
     val containerColor by animateColorAsState(container, label = "statusContainer")
@@ -109,6 +110,13 @@ fun StatusCard(
                             ),
                         ) { Text("暂停") }
                         Protection.Paused -> Button(onClick = onResume) { Text("恢复") }
+                        is Protection.EmergencyPaused -> Button(
+                            onClick = onOpenRecovery,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.error,
+                                contentColor = colors.onError,
+                            ),
+                        ) { Text("故障恢复") }
                         Protection.NotConfigured, Protection.RootMissing, Protection.ModuleMissing,
                         is Protection.Failed ->
                             Button(
@@ -134,6 +142,7 @@ private fun title(state: Protection): String = when (state) {
     Protection.NotConfigured -> "等待配置"
     is Protection.Degraded -> "部分功能不可用"
     Protection.Paused -> "已暂停"
+    is Protection.EmergencyPaused -> "已锁定暂停"
     Protection.RootMissing -> "需要 Root"
     Protection.ModuleMissing -> "模块未就绪"
     is Protection.Failed -> "模块状态异常"
@@ -147,6 +156,7 @@ private fun body(state: Protection, blockedCount: Int): String = when (state) {
     Protection.NotConfigured -> "请完成引导或重新打开应用。"
     is Protection.Degraded -> moduleProblem(state.message)
     Protection.Paused -> "已暂停管控。"
+    is Protection.EmergencyPaused -> "已触发紧急停用标记。请在设置 → 故障恢复中检查并解除锁定。"
     Protection.RootMissing -> "请授予 Stop Card Root 权限。"
     Protection.ModuleMissing -> "请在 LSPosed 中启用模块，选择“系统框架”，然后重启。"
     is Protection.Failed -> moduleProblem(state.message)

@@ -87,8 +87,7 @@ class SystemFacts(private val context: Context) {
         // Public network capabilities can redact the owner. Query the native primary-user VPN configuration.
         val vpns = context.getSystemService(VpnManager::class.java) ?: error("VPN service unavailable")
         activeVpnPackage(vpns)?.let { owner ->
-            check(owner in apps) { "Unknown VPN package" }
-            protect(owner, "vpn")
+            if (owner in apps) protect(owner, "vpn")
         }
         // Entry denial must not partially restrict a process shared with an essential component.
         for (group in apps.values.groupBy { it.uid }.values) {
@@ -119,7 +118,8 @@ class SystemFacts(private val context: Context) {
             .apply { isAccessible = true }.get(value)
         fun owner(config: Any?): String? {
             if (config == null || config.javaClass.getField("legacy").getBoolean(config)) return null
-            return checkNotNull(config.javaClass.getField("user").get(config) as? String) { "Unknown VPN package" }
+            return (config.javaClass.getField("user").get(config) as? String)?.takeIf { it.isNotBlank() }
+                ?: error("Unknown VPN package")
         }
         val service = field(manager, "mService") as IInterface
         if (service.asBinder() !is Binder)
@@ -143,8 +143,8 @@ class SystemFacts(private val context: Context) {
     fun identity(pkg: PackageInfo): AppKey? {
         val app = pkg.applicationInfo ?: return null
         if (app.uid / 100000 != 0) return null
-        val signatures = pkg.signingInfo?.apkContentsSigners ?: error("Missing signing identity: ${pkg.packageName}")
-        check(signatures.isNotEmpty()) { "Missing signer: ${pkg.packageName}" }
+        // Resource-only stubs or partially uninstalled packages without signers stay unmanaged.
+        val signatures = pkg.signingInfo?.apkContentsSigners?.takeIf { it.isNotEmpty() } ?: return null
         val digest = signatures.map { signature ->
             MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
         }.sorted().joinToString(":")

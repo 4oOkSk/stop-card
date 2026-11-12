@@ -14,6 +14,7 @@ sealed interface Protection {
     data object Starting : Protection
     data object NotConfigured : Protection
     data object Paused : Protection
+    data class EmergencyPaused(val reason: String? = null) : Protection
     data class Degraded(val message: String) : Protection
     data object RootMissing : Protection
     data object ModuleMissing : Protection
@@ -28,12 +29,13 @@ sealed interface Protection {
             ModuleClient.State.Waiting -> Starting
             is ModuleClient.State.Failed -> Failed(module.message)
             is ModuleClient.State.Connected -> when {
+                module.module.emergencyDisabled -> EmergencyPaused(module.module.diagnosticDetails["emergency_disabled"])
                 !module.module.configLoaded -> NotConfigured
                 module.module.paused -> Paused
                 sync.error != null -> Degraded(sync.error)
+                !module.module.ready -> Degraded(module.module.lastError ?: "最近任务或系统强停接口尚未就绪")
                 sync.pending -> Starting
                 !settings.protectionEnabled -> Starting
-                !module.module.ready -> Degraded(module.module.lastError ?: "最近任务或系统强停接口尚未就绪")
                 module.module.observeOnly -> Observe
                 else -> Active
             }

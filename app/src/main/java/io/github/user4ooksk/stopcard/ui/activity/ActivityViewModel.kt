@@ -7,19 +7,23 @@ import io.github.user4ooksk.stopcard.data.EventsRepository
 import io.github.user4ooksk.stopcard.model.StopEvent
 import io.github.user4ooksk.stopcard.model.StopReason
 import io.github.user4ooksk.stopcard.model.isStop
+import io.github.user4ooksk.stopcard.ui.dayStarts
 import io.github.user4ooksk.stopcard.ui.daysBefore
 import io.github.user4ooksk.stopcard.ui.startOfDay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
 
-    enum class Filter { ALL, CARD, OBSERVE, VISIBLE, MANUAL }
+    enum class Filter { ALL, CARD, BLOCKED, OBSERVE, MANUAL }
 
     /** One line in the list; consecutive identical stops of the same app are folded together. */
     data class Row(val event: StopEvent, val label: String, val count: Int)
@@ -38,17 +42,20 @@ class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
 
     val filter = MutableStateFlow(Filter.ALL)
 
-    private val since = System.currentTimeMillis() - EventsRepository.RETENTION_MS
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val recentEvents = dayStarts().flatMapLatest { today ->
+        val cutoff = minOf(daysBefore(today, 6), System.currentTimeMillis() - EventsRepository.RETENTION_MS)
+        graph.events.since(cutoff).map { events -> today to events }
+    }
 
     val state: StateFlow<State> = combine(
-        graph.events.since(since),
+        recentEvents,
         graph.apps.apps.filterNotNull(),
         filter,
-    ) { events, apps, filter ->
-        val now = System.currentTimeMillis()
-        val weekStart = daysBefore(now, 6)
+    ) { (today, events), apps, filter ->
+        val weekStart = daysBefore(today, 6)
         val week = (6 downTo 0).map { daysAgo ->
-            val start = daysBefore(now, daysAgo)
+            val start = daysBefore(today, daysAgo)
             ChartDay(start, events.count { startOfDay(it.time) == start && it.reason.isStop })
         }
         val shown = events.filter { it.matches(filter) }
@@ -72,9 +79,9 @@ class ActivityViewModel(private val graph: AppGraph) : ViewModel() {
 
     private fun StopEvent.matches(filter: Filter) = when (filter) {
         Filter.ALL -> true
-        Filter.CARD -> reason == StopReason.CARD_REMOVED
+        Filter.CARD -> reason == StopReason.CARD_REMOVED || reason == StopReason.LAST_VISIBLE || reason == StopReason.FLOW_FINISHED
+        Filter.BLOCKED -> reason == StopReason.BLOCKED || reason == StopReason.CLOSED_APP_RESTARTED
         Filter.OBSERVE -> reason == StopReason.OBSERVE
-        Filter.VISIBLE -> reason == StopReason.LAST_VISIBLE
         Filter.MANUAL -> reason == StopReason.MANUAL
     }
 

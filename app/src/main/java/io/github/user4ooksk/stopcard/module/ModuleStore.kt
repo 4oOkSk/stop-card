@@ -15,7 +15,7 @@ class ModuleStore(private val fault: (String) -> Unit) {
     private val io = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(256),
         { action -> Thread(action, "stop-card-storage").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy())
-    private var lastPrune = 0L
+    private var lastPrune = -60_000L
     private val latest = ConcurrentHashMap<String, String>()
     private val scheduled = ConcurrentHashMap.newKeySet<String>()
 
@@ -31,6 +31,13 @@ class ModuleStore(private val fault: (String) -> Unit) {
     }
 
     fun paused(): Boolean = File(ModuleProtocol.PAUSE).exists() || File(ModuleProtocol.EMERGENCY_DISABLED).exists()
+
+    fun emergencyReason(): String? {
+        val file = File(ModuleProtocol.EMERGENCY_DISABLED)
+        if (!file.exists()) return null
+        return runCatching { control(file.path, 1024)?.lineSequence()?.firstOrNull()?.trim()?.take(64) }
+            .getOrNull().orEmpty().ifBlank { "locked" }
+    }
 
     fun commands(): List<Pair<File, String>> {
         val dir = File(ModuleProtocol.COMMAND_DIR)
@@ -57,7 +64,8 @@ class ModuleStore(private val fault: (String) -> Unit) {
         latest[path] = text
         if (!scheduled.add(path)) return
         submit(rejected = { scheduled.remove(path) }) {
-            try { latest.remove(path)?.let { atomic(File(path), it) } }
+            // Heartbeat/status files are scoped to the current bootId; atomic rename suffices without fsync.
+            try { latest.remove(path)?.let { atomic(File(path), it, sync = false) } }
             finally {
                 scheduled.remove(path)
                 latest[path]?.let { replace(path, it) }
@@ -68,7 +76,11 @@ class ModuleStore(private val fault: (String) -> Unit) {
     fun maintenance(elapsed: Long) {
         if (elapsed - lastPrune < 60_000) return
         lastPrune = elapsed
-        submit { prune(File(ModuleProtocol.EVENTS)) }
+        submit {
+            cleanTempFiles(File(ModuleProtocol.DIR))
+            cleanTempFiles(File(ModuleProtocol.COMMAND_DIR))
+            prune(File(ModuleProtocol.EVENTS))
+        }
     }
 
     fun event(pkg: String, reason: String, detail: String = "") {
@@ -112,12 +124,21 @@ class ModuleStore(private val fault: (String) -> Unit) {
         if (dir.path != ModuleProtocol.DIR) validateParent(File(ModuleProtocol.DIR))
     }
 
-    private fun atomic(file: File, text: String) {
-        file.parentFile?.mkdirs()
-        val tmp = File(file.parentFile, ".${file.name}.${java.util.UUID.randomUUID()}.tmp")
+    private fun atomic(file: File, text: String, sync: Boolean = true) {
+        val parent = file.parentFile
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs()
+            runCatching { Os.chmod(parent.path, 448) }
+        }
+        // Single-worker storage executor owns one deterministic staging file per target.
+        val tmp = File(parent, ".${file.name}.tmp")
+        tmp.delete()
         val descriptor = Os.open(tmp.path, OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW, 384)
         try {
-            java.io.FileOutputStream(descriptor).use { output -> output.write(text.toByteArray(Charsets.UTF_8)); output.fd.sync() }
+            java.io.FileOutputStream(descriptor).use { output ->
+                output.write(text.toByteArray(Charsets.UTF_8))
+                if (sync) output.fd.sync()
+            }
             Os.rename(tmp.path, file.path)
         } finally {
             // Android streams do not own a descriptor supplied by the caller.
@@ -131,6 +152,27 @@ class ModuleStore(private val fault: (String) -> Unit) {
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             fault("storage:queue_full")
             rejected()
+        }
+    }
+
+    companion object {
+        internal fun cleanTempFiles(dir: File, cutoffMs: Long = System.currentTimeMillis() - 60_000) {
+            if (!dir.isDirectory) return
+            java.nio.file.Files.newDirectoryStream(dir.toPath(), "*.tmp").use { stream ->
+                var scanned = 0
+                for (entry in stream) {
+                    if (++scanned > 1_024) break
+                    runCatching {
+                        val attrs = java.nio.file.Files.readAttributes(
+                            entry, java.nio.file.attribute.BasicFileAttributes::class.java,
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                        )
+                        if (attrs.isRegularFile && attrs.lastModifiedTime().toMillis() < cutoffMs) {
+                            java.nio.file.Files.deleteIfExists(entry)
+                        }
+                    }
+                }
+            }
         }
     }
 

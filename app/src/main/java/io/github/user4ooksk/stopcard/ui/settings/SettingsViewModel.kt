@@ -27,8 +27,12 @@ class SettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun setProtectionEnabled(enabled: Boolean) {
         viewModelScope.launch {
+            val emergency = (graph.module.state.value as? ModuleClient.State.Connected)?.module?.emergencyDisabled == true
+            if (enabled && emergency) {
+                maintenance.value = "当前处于锁定暂停状态，请在“故障恢复”中解除锁定。"
+                return@launch
+            }
             if (!graph.setProtectionEnabled(enabled)) maintenance.value = "暂停或恢复请求未写入，请检查 Root 授权"
-            graph.module.refresh()
         }
     }
 

@@ -84,7 +84,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     @Volatile private var launcherUids = emptySet<Int>()
     @Volatile private var systemUiUid = -1
     @Volatile private var providers = emptyMap<String, Triple<String, Int, String>>()
-    @Volatile private var notificationIntents = emptySet<String>()
+    private val notificationIntents = ConcurrentHashMap.newKeySet<String>()
+    private var lastNotificationScanAt = -5_000L
 
     fun report(): Map<String, HookCapability> = capabilities.toSortedMap()
     fun installed(name: String): Boolean = capabilities[name]?.status == "installed"
@@ -150,15 +151,16 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("task_remove", "com.android.server.wm.RecentTasks", "remove", {
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.wm.Task")
         }, before = { p ->
-            removalFact(p.args[0])?.let { sink.removed(it.task, it.owner, false) }
+            p.args[0]?.let(::removalFact)?.let { sink.removed(it.task, it.owner, false) }
             sink.wake()
         })
         hook("user_task_close", "com.android.server.wm.ActivityTaskSupervisor", "removeTask", {
             it.returnType == Void.TYPE && names(it).take(4) == listOf("com.android.server.wm.Task", "boolean", "boolean", "java.lang.String") &&
                 (it.parameterCount == 4 || names(it).drop(4) == listOf("int", "int", "java.lang.String"))
         }, before = { p ->
-            val t = removalFact(p.args[0]) ?: run { sink.wake(); return@hook }
-            val reason = p.args[3] as String
+            val task = p.args[0] ?: return@hook
+            val t = removalFact(task) ?: run { sink.wake(); return@hook }
+            val reason = (p.args[3] as? String).orEmpty()
             // The permission-checked removal route is explicit even after Binder identity is
             // cleared. AppTask.finishAndRemoveTask uses a different native reason and does not
             // request process killing; trimming and display cleanup also have separate reasons.
@@ -217,17 +219,17 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("activity", "com.android.server.wm.ActivityStarter", "startActivityInner", {
             it.returnType == Int::class.javaPrimitiveType && names(it).take(2) == listOf("com.android.server.wm.ActivityRecord", "com.android.server.wm.ActivityRecord")
         }, before = { p ->
-            val r = p.args[0]
+            val r = p.args[0] ?: return@hook
             val target = activityFact(r)
             if (target.uid / 100000 != 0) return@hook
             val callingUid = field(r, "launchedFromUid") as Int
             val source = p.args[1]?.let(::activityFact)
                 ?: pendingCaller.get()
-            val intent = field(r, "intent") as Intent
+            val intent = field(r, "intent") as? Intent
             val info = field(r, "info") as ActivityInfo
             val component = ComponentName(info.packageName, info.name).flattenToString()
             val evidence = launchSource.get() ?: when {
-                callingUid in launcherUids && intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER) -> OpenSource.LAUNCHER
+                callingUid in launcherUids && intent?.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER) -> OpenSource.LAUNCHER
                 else -> null
             }
             val fact = LaunchFact(source, target, component, evidence, pendingObserved.get() == true)
@@ -235,8 +237,9 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             sink.launch(fact) // Observation only. Android owns permission and BAL decisions.
         }, after = { p ->
             val original = p.getObjectExtra("stopcard.launch") as? LaunchFact ?: return@hook
+            val fallback = p.args[0] ?: return@hook
             val result = p.result as? Int ?: -1
-            val actual = if (result in 0..3) field(p.thisObject, "mLastStartActivityRecord") ?: p.args[0] else p.args[0]
+            val actual = if (result in 0..3) field(p.thisObject, "mLastStartActivityRecord") ?: fallback else fallback
             val fact = original.copy(target = activityFact(actual))
             if (!p.hasThrowable() && result in 0..3) lifetimes.started(fact.target.token, actual, Kind.ACTIVITY)
             sink.launched(fact, !p.hasThrowable() && result in 0..3, original.target.token)
@@ -295,7 +298,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             // Use the resolved, permission-protected service and the actual caller process;
             // a package name or QS_TILE action supplied by another app is insufficient.
             val permission = (field(r, "serviceInfo") as ServiceInfo).permission
-            val action = (p.args[0] as Intent).action
+            val action = (p.args[0] as? Intent)?.action
             val systemBinding = context.kind == EntryKind.BIND && info.uid / 100000 == 0 && when {
                 context.source == "com.android.systemui" && trustedSystemUi(context.uid, context.pid) ->
                     action == android.service.quicksettings.TileService.ACTION_QS_TILE && permission == android.Manifest.permission.BIND_QUICK_SETTINGS_TILE
@@ -331,25 +334,28 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("binding_remove", "com.android.server.am.ActiveServices", "removeConnectionLocked", {
             it.returnType == Int::class.javaPrimitiveType && names(it).firstOrNull() == "com.android.server.am.ConnectionRecord"
         }, after = { p ->
-            lifetimes.ended(token(p.args[0]))
-            sink.binding(token(p.args[0]), null, CallTarget("", kind = EntryKind.BIND), false)
+            val conn = p.args[0] ?: return@hook
+            lifetimes.ended(token(conn))
+            sink.binding(token(conn), null, CallTarget("", kind = EntryKind.BIND), false)
         })
         // bringDownServiceLocked only schedules onDestroy. Release after Android processes the
         // completion (also used when the hosting process dies), never while onDestroy is running.
         hook("service_finish", "com.android.server.am.ActiveServices", "serviceDoneExecutingLocked", {
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.am.ServiceRecord", "boolean", "boolean", "boolean", "int")
         }, after = { p ->
-            if (!p.hasThrowable() && p.args[2] == true && (field(p.args[0], "executeNesting") as Int) <= 0)
-                finished(token(p.args[0]))
+            val r = p.args[0] ?: return@hook
+            if (!p.hasThrowable() && p.args[2] == true && (field(r, "executeNesting") as Int) <= 0)
+                finished(token(r))
         })
         hook("service_teardown", "com.android.server.am.ActiveServices", "bringDownServiceLocked", {
             it.returnType == Void.TYPE && names(it) in listOf(
                 listOf("com.android.server.am.ServiceRecord", "boolean"),
                 listOf("com.android.server.am.ServiceRecord", "boolean", "int"))
         }, after = { p ->
+            val r = p.args[0] ?: return@hook
             // Cancelled pending services have no app callback. A scheduled destroy has nesting > 0.
-            if (!p.hasThrowable() && field(p.args[0], "destroying") == false && field(p.args[0], "executeNesting") == 0)
-                finished(token(p.args[0]))
+            if (!p.hasThrowable() && field(r, "destroying") == false && field(r, "executeNesting") == 0)
+                finished(token(r))
         })
     }
 
@@ -358,9 +364,9 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("int", "int", "int", "java.lang.String", "com.android.server.notification.NotificationRecord", "boolean", "boolean")
         }, after = { p ->
             if (p.hasThrowable() || p.result != true) return@hook
-            val record = p.args[4]
-            val sbn = call(record, "getSbn")!!
-            val pkg = call(sbn, "getPackageName") as String
+            val record = p.args[4] ?: return@hook
+            val sbn = call(record, "getSbn") ?: return@hook
+            val pkg = call(sbn, "getPackageName") as? String ?: return@hook
             val user = p.args[0] as Int
             val decision = sink.entry(user, CallTarget(pkg, kind = EntryKind.NOTIFICATION), Binder.getCallingUid(), call(sbn, "getOpPkg") as? String)
             if (!decision.allow) {
@@ -368,6 +374,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 // Report the same not-shown outcome used by the native UPDATE_ONLY path.
                 call(p.thisObject, "maybeReportForegroundServiceUpdate", record, false)
                 p.result = false
+            } else if (notificationIntents.size < 8192) {
+                runCatching { recordNotificationSbn(sbn, notificationIntents) }
             }
         })
     }
@@ -385,8 +393,17 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                             ?: param.args.firstOrNull()?.takeIf(type::isInstance)?.let { synchronized(broadcastOrigins) { broadcastOrigins[it] } }
                             ?: return@guarded
                         if (field(param.thisObject, "callingUid") != origin.caller.uid) return@guarded
+                        val receivers = field(param.thisObject, "receivers") as? List<*>
+                        if (receivers != null && receivers.isEmpty()) return@guarded
                         synchronized(broadcastOrigins) {
-                            check(broadcastOrigins.size < 512 || broadcastOrigins.containsKey(param.thisObject)) { "Broadcast provenance limit" }
+                            if (broadcastOrigins.size >= 512 && !broadcastOrigins.containsKey(param.thisObject)) {
+                                broadcastOrigins.keys.removeAll { rec ->
+                                    val total = (field(rec, "receivers") as? List<*>)?.size ?: 0
+                                    val done = field(rec, "terminalCount") as? Int ?: 0
+                                    done >= total
+                                }
+                                if (broadcastOrigins.size >= 512) return@guarded
+                            }
                             broadcastOrigins[param.thisObject] = origin
                         }
                     }
@@ -405,17 +422,17 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         }, after = { p ->
             if (p.result != null || p.hasThrowable()) return@hook
             if (p.args.size == 3 && p.args[2] == true) return@hook // Native enqueue preflight is not delivery.
-            val receiver = p.args[1]
+            val receiver = p.args[1] ?: return@hook
             val info = if (receiver is android.content.pm.ResolveInfo) receiver.activityInfo else null
             val pkg = info?.packageName ?: field(receiver, "packageName") as? String ?: return@hook
             val uid = info?.applicationInfo?.uid ?: field(receiver, "owningUid") as Int
             val component = info?.let { ComponentName(it.packageName, it.name).flattenToString() }
-            val record = p.args[0]
+            val record = p.args[0] ?: return@hook
             val origin = synchronized(broadcastOrigins) { broadcastOrigins[record] }
             val callerUid = field(record, "callingUid") as Int
             val callerPackage = field(record, "callerPackage") as? String
             val target = CallTarget(pkg, component, EntryKind.BROADCAST)
-            val intent = field(record, "intent") as Intent
+            val intent = field(record, "intent") as? Intent ?: return@hook
             val widget = callerUid == 1000 && callerPackage == "android" && info != null &&
                 intent.component == ComponentName(pkg, info.name) && intent.action in WIDGET_ACTIONS
             val decision = sink.entry(uid / 100000, target,
@@ -435,15 +452,19 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == Boolean::class.javaPrimitiveType && names(it) in listOf(
                 listOf("int", "int", "java.lang.String"), listOf("int", "int", "java.lang.String", "int"))
         }, before = { p ->
-            p.setObjectExtra("stopcard.delivery", (field(p.thisObject, "delivery") as IntArray)[p.args[0] as Int])
+            val index = p.args[0] as Int
+            val delivery = field(p.thisObject, "delivery") as? IntArray ?: return@hook
+            if (index in delivery.indices) p.setObjectExtra("stopcard.delivery", delivery[index])
         }, after = { p ->
             if (p.hasThrowable()) return@hook
             val r = p.thisObject
             val index = p.args[0] as Int
-            val state = (field(r, "delivery") as IntArray)[index]
-            val previous = p.getObjectExtra("stopcard.delivery") as Int
+            val delivery = field(r, "delivery") as? IntArray ?: return@hook
+            val state = if (index in delivery.indices) delivery[index] else return@hook
+            val previous = p.getObjectExtra("stopcard.delivery") as? Int ?: return@hook
             if (state == previous) return@hook
-            val receiver = (field(r, "receivers") as List<*>)[index] ?: return@hook
+            val receivers = field(r, "receivers") as? List<*> ?: return@hook
+            val receiver = receivers.getOrNull(index) ?: return@hook
             val info = (receiver as? android.content.pm.ResolveInfo)?.activityInfo
             val pkg = info?.packageName ?: field(receiver, "packageName") as? String ?: return@hook
             val name = info?.let { ComponentName(it.packageName, it.name).flattenToString() }
@@ -455,7 +476,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 if (!terminal) lifetimes.started(id, r, Kind.BROADCAST, index) else lifetimes.ended(id)
                 sink.component(id, field(r, "callerPackage") as? String, CallTarget(pkg, name, EntryKind.BROADCAST), !terminal)
             }
-            if (terminal && field(r, "terminalCount") == (field(r, "receivers") as List<*>).size) {
+            if (terminal && field(r, "terminalCount") == receivers.size) {
                 // An ordered broadcast may have no scheduled receiver between two deliveries.
                 finished(token(r))
                 synchronized(broadcastOrigins) { broadcastOrigins.remove(r) }
@@ -467,7 +488,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("provider", "com.android.server.am.ContentProviderHelper", "getContentProviderImpl", {
             it.returnType.name == "android.app.ContentProviderHolder" && names(it) == listOf("android.app.IApplicationThread", "java.lang.String", "android.os.IBinder", "int", "java.lang.String", "java.lang.String", "boolean", "int")
         }, before = { p ->
-            val owner = providers[p.args[1] as String] ?: return@hook
+            val providerName = p.args[1] as? String ?: return@hook
+            val owner = providers[providerName] ?: return@hook
             val user = p.args[7] as Int
             val target = CallTarget(owner.first, owner.third, EntryKind.PROVIDER)
             val callerUid = (p.args[3] as Int).let { if (it < 0) Binder.getCallingUid() else it }
@@ -496,8 +518,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("job", "com.android.server.job.JobServiceContext", "executeRunnableJob", {
             it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("com.android.server.job.controllers.JobStatus", "int")
         }, before = { p ->
-            val job = p.args[0]
-            val info = call(job, "getJob") as android.app.job.JobInfo
+            val job = p.args[0] ?: return@hook
+            val info = call(job, "getJob") as? android.app.job.JobInfo ?: return@hook
             val uid = call(job, "getUid") as Int
             val component = info.service
             if (!sink.entry(uid / 100000, CallTarget(component.packageName, component.flattenToString(), EntryKind.JOB), uid).allow) p.result = false
@@ -510,9 +532,9 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("alarm", "com.android.server.alarm.AlarmManagerService\$DeliveryTracker", "deliverLocked", {
             it.returnType == Void.TYPE && names(it) == listOf("com.android.server.alarm.Alarm", "long")
         }, before = { p ->
-            val alarm = p.args[0]
+            val alarm = p.args[0] ?: return@hook
             val uid = field(alarm, "creatorUid") as Int
-            val pkg = field(alarm, "sourcePackage") as? String ?: field(alarm, "packageName") as String
+            val pkg = field(alarm, "sourcePackage") as? String ?: field(alarm, "packageName") as? String ?: return@hook
             if (!sink.entry(uid / 100000, CallTarget(pkg, kind = EntryKind.ALARM), uid).allow) {
                 val service = field(p.thisObject, "this\$0")!!
                 val listener = field(alarm, "listener")
@@ -539,7 +561,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == Int::class.javaPrimitiveType && names(it).take(4) == listOf("android.app.IApplicationThread", "int", "android.content.Intent", "java.lang.String")
         }, before = { p ->
             val key = field(p.thisObject, "key") ?: return@hook
-            val creator = field(key, "packageName") as String
+            val creator = field(key, "packageName") as? String ?: return@hook
             val uid = field(p.thisObject, "uid") as Int
             pendingCaller.set(ActivityFact("pending:$uid", creator, uid, null, false))
             val sender = Binder.getCallingUid()
@@ -557,17 +579,18 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             it.returnType == String::class.java && names(it) == listOf("com.android.server.am.ServiceRecord", "int",
                 "boolean", "boolean", "boolean", "boolean", "boolean", "int")
         }, before = { p ->
-            val record = p.args[0]
-            val component = field(record, "name") as ComponentName
+            val record = p.args[0] ?: return@hook
+            val component = field(record, "name") as? ComponentName ?: return@hook
             processOrigins.set(ProcessOrigin(component.packageName, component.flattenToString(),
                 field(record, "mRecentCallingUid") as Int, field(record, "mRecentCallingPackage") as? String))
         })
         hook("process_broadcast_origin", "com.android.server.am.BroadcastQueueImpl", "scheduleReceiverColdLocked", {
             it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("com.android.server.am.BroadcastProcessQueue")
         }, before = { p ->
-            val queue = p.args[0]
+            val queue = p.args[0] ?: return@hook
             val record = call(queue, "getActive") ?: return@hook
-            val receiver = (field(record, "receivers") as List<*>)[call(queue, "getActiveIndex") as Int]
+            val receivers = field(record, "receivers") as? List<*> ?: return@hook
+            val receiver = receivers.getOrNull(call(queue, "getActiveIndex") as Int) ?: return@hook
             val info = (receiver as? android.content.pm.ResolveInfo)?.activityInfo ?: return@hook
             processOrigins.set(ProcessOrigin(info.packageName, ComponentName(info.packageName, info.name).flattenToString(),
                 field(record, "callingUid") as Int, field(record, "callerPackage") as? String))
@@ -578,12 +601,13 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                 "int", "boolean", "boolean", "int", "boolean", "int", "java.lang.String", "java.lang.String", "java.lang.String",
                 "[Ljava.lang.String;", "java.lang.Runnable")
         }, before = { p ->
-            val info = p.args[1] as ApplicationInfo
+            val processName = p.args[0] as? String ?: return@hook
+            val info = p.args[1] as? ApplicationInfo ?: return@hook
             if (info.uid / 100000 != 0 || p.args[7] == true || p.args[9] == true) return@hook
             val hosting = p.args[4] ?: return@hook
-            val type = call(hosting, "getType") as String
+            val type = call(hosting, "getType") as? String ?: return@hook
             val origin = processOrigins.get()?.takeIf { it.target == info.packageName }
-            val decision = sink.processStart(info.packageName, info.uid, p.args[0] as String, type,
+            val decision = sink.processStart(info.packageName, info.uid, processName, type,
                 origin?.component, origin?.uid ?: Binder.getCallingUid(), origin?.source)
             if (!decision.allow) p.result = null // Native failure before ProcessRecord creation or Zygote work.
         })
@@ -625,7 +649,8 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         hook("extra_keep_alive", "com.android.server.am.ProcessList", "writeLmkd", {
             it.returnType == Boolean::class.javaPrimitiveType && names(it) == listOf("java.nio.ByteBuffer", "java.nio.ByteBuffer")
         }, before = { p ->
-            LmkdPriority.rewrite(p.args[0] as java.nio.ByteBuffer, sink::priority)?.let { p.args[0] = it }
+            val buf = p.args[0] as? java.nio.ByteBuffer ?: return@hook
+            LmkdPriority.rewrite(buf, sink::priority)?.let { p.args[0] = it }
         })
         val cachedReasons = runCatching {
             listOf("SUBREASON_TOO_MANY_CACHED", "SUBREASON_TOO_MANY_EMPTY", "SUBREASON_TRIM_EMPTY")
@@ -675,7 +700,9 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
                     val app = apps[info.packageName]?.takeIf { it.uid == info.uid } ?: return@mapNotNull null
                     val pid = call(record, "getPid") as Int
                     val processName = field(record, "processName") as String
-                    val shownUi = call(processState(record), if (modernProcess != null) "getHasShownUi" else "hasShownUi") == true
+                    val modern = modernProcess?.isInstance(record) == true
+                    val state = if (modern) record else field(record, "mState")!!
+                    val shownUi = call(state, if (modern) "getHasShownUi" else "hasShownUi") == true
                     if (pid <= 0 || field(record, "uid") != app.uid || (!shownUi && processName != info.processName)) null
                     else PriorityProcess(app, pid, processName, 0)
                 }.groupBy { it.app }.values.mapNotNull { group -> group.singleOrNull() }
@@ -703,6 +730,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     /** Worker-only reconciliation, using the same native locks as lifecycle mutations. */
     fun reconcileOperations(tracked: Set<String>) {
         lifetimes.prune(tracked)
+        if (tracked.isEmpty()) return
         val tasks = atm ?: error("Task service not captured")
         synchronized(field(tasks, "mGlobalLock")!!) {
             lifetimes.review(Kind.ACTIVITY, tracked, { record, _ -> call(record, "getTask") != null }, sink::activityFinished)
@@ -779,24 +807,33 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         }
     }
 
+    private fun recordNotificationSbn(sbn: Any, target: MutableCollection<String>) {
+        val notification = call(sbn, "getNotification") as? Notification ?: return
+        fun addIntent(intent: PendingIntent?) { intent?.let { call(it, "getTarget") }?.let { target.add(token(it)) } }
+        addIntent(notification.contentIntent)
+        notification.actions.orEmpty().forEach { addIntent(it.actionIntent) }
+    }
+
     private fun refreshNotificationIntents() {
         val service = nms ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (capabilities["notification_open"]?.status == "installed" && now - lastNotificationScanAt in 0 until 2_500) return
+        lastNotificationScanAt = now
         runCatching {
             val lock = field(service, "mNotificationLock")!!
-            notificationIntents = synchronized(lock) {
+            val scanned = synchronized(lock) {
                 val list = field(service, "mNotificationList") as List<*>
                 require(list.size <= 4096)
                 buildSet {
                     for (record in list.filterNotNull()) {
-                        val notification = call(call(record, "getSbn")!!, "getNotification") as Notification
-                        fun addIntent(intent: PendingIntent?) { intent?.let { call(it, "getTarget") }?.let { add(token(it)) } }
-                        addIntent(notification.contentIntent)
-                        notification.actions.orEmpty().forEach { addIntent(it.actionIntent) }
+                        call(record, "getSbn")?.let { recordNotificationSbn(it, this) }
                     }
                 }
             }
+            notificationIntents.retainAll(scanned)
+            notificationIntents.addAll(scanned)
             capabilities["notification_open"] = HookCapability("installed", detail = "SystemUI process and posted notification content/action PendingIntent identity")
-        }.onFailure { notificationIntents = emptySet(); unavailable("notification_open", it) }
+        }.onFailure { notificationIntents.clear(); unavailable("notification_open", it) }
     }
 
     /** Full recent tasks plus all Activity records, including shared tasks, split-screen and PiP. */
@@ -807,7 +844,7 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
         return synchronized(lock) {
             val list = field(recents, "mTasks") as? List<*> ?: error("Recent tasks unavailable")
             require(list.size <= 512) { "Task snapshot exceeds limit" }
-            val tasks = list.filterNotNull().map { taskFact(it, recents) }
+            val tasks = list.filterNotNull().mapNotNull { taskFact(it, recents) }
             val root = field(service, "mRootWindowContainer") ?: error("Window root unavailable")
             val visible = HashSet<String>()
             val windows = HashMap<String, String>()
@@ -827,19 +864,21 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
     internal fun removalFact(task: Any): TaskCloseFact? {
         val user = field(task, "mUserId") as Int
         if (user != 0) return null
-        val owner = taskOwner(task) ?: return null
-        return TaskCloseFact(TaskKey(user, field(task, "mTaskId") as Int, boot), owner)
+        val id = field(task, "mTaskId") as Int
+        val owner = taskOwner(task, id) ?: return null
+        return TaskCloseFact(TaskKey(user, id, boot), owner)
     }
 
-    private fun taskOwner(task: Any): String? =
+    private fun taskOwner(task: Any, taskId: Int = -1): String? =
         (field(task, "realActivity") as? ComponentName)?.packageName
             ?: (call(task, "getBaseIntent") as? Intent)?.component?.packageName
+            ?: knownTasks[taskId]?.owner
 
-    private fun taskFact(task: Any, recents: Any?): TaskFact {
-        val id = field(task, "mTaskId") as Int
+    internal fun taskFact(task: Any, recents: Any?): TaskFact? {
         val user = field(task, "mUserId") as Int
+        if (user != 0) return null
+        val id = field(task, "mTaskId") as Int
         val intent = call(task, "getBaseIntent") as? Intent
-        val owner = taskOwner(task) ?: error("Task has no owner")
         val participants = HashSet<String>()
         val visible = HashSet<String>()
         var count = 0
@@ -849,6 +888,11 @@ class FrameworkAdapter(private val loader: ClassLoader, private val boot: String
             participants += a.packageName
             if (a.visible) visible += a.packageName
         }, true)
+        val owner = taskOwner(task, id) ?: when {
+            participants.isEmpty() -> return null
+            participants.size == 1 -> participants.first()
+            else -> error("Task has ambiguous owner")
+        }
         val eligible = recents != null && call(recents, "isVisibleRecentTask", task) == true &&
             intent != null && intent.flags and Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS == 0
         return TaskFact(TaskKey(user, id, boot), owner, participants, visible, eligible)

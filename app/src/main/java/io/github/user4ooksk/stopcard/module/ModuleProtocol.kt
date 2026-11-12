@@ -142,6 +142,7 @@ object ModuleProtocol {
         val recovery: String = "unknown",
         val commandResults: Map<String, String> = emptyMap(),
         val extraKeepAlive: Boolean = false,
+        val emergencyDisabled: Boolean = false,
         val diagnosticDetails: Map<String, String> = emptyMap(),
     ) {
         /** Keep one atomic status document below the bounded root reader's output limit. */
@@ -219,6 +220,7 @@ object ModuleProtocol {
             put("recovery", recovery)
             put("commandResults", JSONObject(commandResults))
             put("extraKeepAlive", extraKeepAlive)
+            put("emergencyDisabled", emergencyDisabled)
             put("diagnosticDetails", JSONObject(diagnosticDetails))
         }.toString()
 
@@ -257,6 +259,7 @@ object ModuleProtocol {
                     recovery = o.optString("recovery", "unknown"),
                     commandResults = o.optJSONObject("commandResults").stringMap(),
                     extraKeepAlive = o.optBoolean("extraKeepAlive", false),
+                    emergencyDisabled = o.optBoolean("emergencyDisabled", false),
                     diagnosticDetails = o.optJSONObject("diagnosticDetails").stringMap(),
                 )
             }.getOrNull()

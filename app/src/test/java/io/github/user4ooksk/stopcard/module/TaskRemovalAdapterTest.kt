@@ -22,9 +22,22 @@ class TaskRemovalAdapterTest {
 
     class OtherUserTask { @JvmField val mUserId = 10 }
 
+    class EmptyContainerInRecents {
+        @JvmField val mUserId = 0
+        @JvmField val mTaskId = 77
+        @JvmField val realActivity: Any? = null
+        fun getBaseIntent(): Any? = null
+        fun forAllActivities(action: java.util.function.Consumer<Any>, topToBottom: Boolean) = Unit
+    }
+
     @Test fun ownerlessOrganizerRemovalDoesNotDisableHooks() {
         assertNull(adapter.removalFact(OrganizerTask()))
         assertNull(adapter.removalFact(OrganizerTask()))
+    }
+
+    @Test fun emptyContainerAndSecondaryUserTasksAreSkippedInSnapshots() {
+        assertNull(adapter.taskFact(EmptyContainerInRecents(), null))
+        assertNull(adapter.taskFact(OtherUserTask(), null))
     }
 
     @Test fun secondaryUserRemovalDoesNotInspectAppIdentity() {

@@ -8,7 +8,7 @@ import io.github.user4ooksk.stopcard.module.SystemFacts
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * App-side view of the LSPosed module. The module writes its state and event log as system_server;
@@ -38,12 +39,18 @@ class ModuleClient(
     }
 
     private val root = RootShell()
+    private val wakeSignal = Channel<Unit>(Channel.CONFLATED)
 
     @Volatile
-    private var active = true
+    private var uiActive = false
+
+    @Volatile
+    private var tileActive = false
 
     @Volatile
     private var rootCached = false
+    private val _rootAvailable = MutableStateFlow(false)
+    val rootAvailable: StateFlow<Boolean> = _rootAvailable.asStateFlow()
 
     private val _state = MutableStateFlow<State>(State.Waiting)
     val state: StateFlow<State> = _state.asStateFlow()
@@ -63,25 +70,37 @@ class ModuleClient(
     fun start() {
         scope.launch {
             while (true) {
-                if (active) {
+                if (isActive()) {
                     refresh()
-                    delay(REFRESH_MS)
+                    withTimeoutOrNull(REFRESH_MS) { wakeSignal.receive() }
                 } else {
-                    delay(IDLE_MS)
+                    wakeSignal.receive()
                 }
             }
         }
     }
 
-    /** Called from the process lifecycle; no root shell is spawned while the UI is in the background. */
+    fun isActive(): Boolean = uiActive || tileActive
+
+    /** Called from the process lifecycle; no root shell is spawned while UI and tile are inactive. */
     fun setActive(value: Boolean) {
-        active = value
+        val was = isActive()
+        uiActive = value
+        if (!was && isActive()) wakeSignal.trySend(Unit)
+    }
+
+    fun setTileListening(value: Boolean) {
+        val was = isActive()
+        tileActive = value
+        if (!was && isActive()) wakeSignal.trySend(Unit)
     }
 
     fun rootAvailable(): Boolean = rootCached
 
     suspend fun diagnostics(): String = withContext(Dispatchers.IO) {
-        root.diagnostics() + "\n" + root.read(ModuleProtocol.STATE).orEmpty()
+        val raw = root.read(ModuleProtocol.STATE).orEmpty()
+        val formatted = if (raw.isBlank()) "" else runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
+        root.diagnostics() + "\n" + formatted
     }
 
     suspend fun refresh(forceRoot: Boolean = false) {
@@ -91,6 +110,7 @@ class ModuleClient(
                 return@withContext
             }
             rootCached = root.available(forceRoot)
+            _rootAvailable.value = rootCached
             if (!rootCached) {
                 _state.value = State.NoRoot
                 return@withContext
@@ -112,7 +132,14 @@ class ModuleClient(
             } else if (issue != null) {
                 _state.value = State.Failed("模块版本或系统进程身份不匹配，请重启以加载当前版本", module)
             } else {
-                if (module.appliedGeneration > 0 && _synchronization.value.generation == module.appliedGeneration) {
+                val sync = _synchronization.value
+                val confirmed = when {
+                    module.appliedGeneration > 0 -> module.appliedGeneration
+                    (module.paused || module.observeOnly) && module.configLoaded -> module.configGeneration
+                    else -> -1L
+                }
+                if (sync.error == null && confirmed > 0 &&
+                    (sync.generation in 1..confirmed || (!sync.pending && sync.generation != module.configGeneration))) {
                     _synchronization.value = Synchronization(generation = module.configGeneration)
                 }
                 _state.value = State.Connected(module)
@@ -130,9 +157,17 @@ class ModuleClient(
                 check(!exists || text != null) { "读取当前配置失败" }
                 val previous = text?.let(ModuleProtocol.Config::fromJson)
                 val diskGeneration = text?.let { JSONObject(it).optLong("configGeneration", 0) } ?: 0L
-                val confirmed = (state.value as? State.Connected)?.module?.configGeneration ?: 0L
+                val connected = (state.value as? State.Connected)?.module
+                val confirmed = connected?.configGeneration?.takeIf { connected.configLoaded } ?: 0L
                 val expected = if (config.configGeneration > 0) config.configGeneration else preferences.getLong("generation", 0)
                 val next = ModuleProtocol.nextConfig(previous, diskGeneration, confirmed, config.copy(configGeneration = expected))
+                if (previous != null && next == previous && text != null) {
+                    check(preferences.edit().putLong("generation", next.configGeneration).commit()) { "记录配置代次失败" }
+                    val applied = connected != null && (connected.appliedGeneration >= next.configGeneration ||
+                        ((connected.paused || connected.observeOnly) && connected.configLoaded && connected.configGeneration >= next.configGeneration))
+                    _synchronization.value = Synchronization(pending = !applied, generation = next.configGeneration)
+                    return@runCatching next
+                }
                 _synchronization.value = Synchronization(true, next.configGeneration)
                 val write = root.writeConfiguration(next.toJson(), text)
                 check(write.ok) {
@@ -181,22 +216,33 @@ class ModuleClient(
     private suspend fun submitCommand(packages: Collection<String> = emptyList(), stopAll: Boolean = false, clearLog: Boolean = false): Boolean = commandMutex.withLock {
         withContext(Dispatchers.IO) {
             val module = (state.value as? State.Connected)?.module ?: return@withContext false
-            if (module.appliedGeneration <= 0) return@withContext false
-            val targets = if (stopAll) module.apps.filter { it.cards > 0 }.map { it.packageName } else packages.distinct()
+            val generation = if (clearLog) {
+                if (!module.configLoaded || module.configGeneration <= 0) return@withContext false
+                module.configGeneration
+            } else {
+                if (module.appliedGeneration <= 0 || module.paused || module.observeOnly) return@withContext false
+                module.appliedGeneration
+            }
+            val targets = if (stopAll) {
+                module.apps.filter {
+                    it.running && !it.visible && it.state in setOf("card", "managed", "pending") && it.packageName != context.packageName
+                }.map { it.packageName }
+            } else packages.distinct()
+            if (!clearLog && targets.isEmpty()) return@withContext false
             val identity = SystemFacts(context)
             val command = ModuleProtocol.Command(
-                id = ++commandId, configGeneration = module.appliedGeneration,
+                id = ++commandId, configGeneration = generation,
                 expiresAt = System.currentTimeMillis() + COMMAND_TTL_MS,
-                stop = if (stopAll) emptyList() else targets.toList(), stopAll = stopAll, clearLog = clearLog,
+                stop = targets.toList(), stopAll = false, clearLog = clearLog,
                 identities = targets.mapNotNullTo(HashSet(), identity::currentIdentity),
             )
+            if (!clearLog && command.identities.size != targets.size) return@withContext false
             root.write(ModuleProtocol.commandPath(command.id), command.toJson())
         }
     }
 
     private companion object {
         const val REFRESH_MS = 3_000L
-        const val IDLE_MS = 20_000L
         const val COMMAND_TTL_MS = 15_000L
     }
 }

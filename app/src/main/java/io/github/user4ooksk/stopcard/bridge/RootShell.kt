@@ -55,15 +55,7 @@ class RootShell {
             val output = StringBuffer()
             val reader = Thread {
                 try {
-                    process.inputStream.bufferedReader().use { stream ->
-                        val buffer = CharArray(4096)
-                        while (true) {
-                            val count = stream.read(buffer)
-                            if (count < 0) break
-                            if (output.length + count > MAX_OUTPUT_CHARS) break
-                            output.append(buffer, 0, count)
-                        }
-                    }
+                    process.inputStream.bufferedReader().use { stream -> drainStream(stream, output) }
                 } catch (_: Exception) {
                 }
             }.apply {
@@ -160,14 +152,29 @@ class RootShell {
             echo "sdk=$(getprop ro.build.version.sdk)"
             echo "release=$(getprop ro.build.version.release)"
             ls -ld ${quote(ModuleProtocol.DIR)} 2>&1
-            ls -l ${quote(ModuleProtocol.DIR)} 2>&1
+            ls -l ${quote(ModuleProtocol.DIR)} 2>&1 | grep -vE '\.tmp$' || true
             test -e ${quote(ModuleProtocol.PAUSE)} && echo "paused=yes" || echo "paused=no"
+            test -e ${quote(ModuleProtocol.EMERGENCY_DISABLED)} && echo "emergency_disabled=$(head -n 1 ${quote(ModuleProtocol.EMERGENCY_DISABLED)} 2>/dev/null)" || echo "emergency_disabled=no"
         """.trimIndent(),
     ).output
+
+    internal fun drainStream(stream: java.io.Reader, output: StringBuffer, maxChars: Int = MAX_OUTPUT_CHARS) {
+        val buffer = CharArray(4096)
+        var drained = 0
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            val remaining = maxChars - output.length
+            if (remaining > 0) output.append(buffer, 0, minOf(count, remaining))
+            drained += count
+            if (drained > MAX_DRAIN_CHARS) break
+        }
+    }
 
     private fun quote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     private companion object {
         const val MAX_OUTPUT_CHARS = 256 * 1024
+        const val MAX_DRAIN_CHARS = 4 * 1024 * 1024
     }
 }
