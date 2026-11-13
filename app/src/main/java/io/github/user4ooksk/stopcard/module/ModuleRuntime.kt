@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.FileObserver
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Message
 import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
@@ -63,7 +64,7 @@ object ModuleRuntime : FrameworkCallbacks {
     private var lastReadyAt = -10_000L
     private var lastReadyStatus: String? = null
     private var lastConfigReadAt = -10_000L
-    private var configDirty = true
+    @Volatile private var configDirty = true
     private var lastConfigText: String? = null
     private var acceptedConfig: ModuleProtocol.Config? = null
     private var appliedGeneration = -1L
@@ -105,16 +106,33 @@ object ModuleRuntime : FrameworkCallbacks {
         adapter = FrameworkAdapter(loader, boot, this)
         if (!paused && boot.isNotBlank()) adapter.captureServices()
         val worker = HandlerThread("stop-card-control").apply { start() }
-        handler = Handler(worker.looper).also { it.post(loop) }
+        // All messages on this Looper belong to the module, including platform-delivered
+        // package/settings/network callbacks and command receipts, not only the tick runnable.
+        handler = object : Handler(worker.looper) {
+            override fun dispatchMessage(msg: Message) {
+                guardModule({ error ->
+                    try { controlFailed(error) }
+                    finally {
+                        queuedWake.set(false)
+                        removeCallbacks(loop)
+                        postDelayed(loop, 1_000)
+                    }
+                }) { super.dispatchMessage(msg) }
+            }
+        }.also { it.post(loop) }
         store.ready(JSONObject().put("boot", boot).put("pid", Process.myPid()).put("status", "starting").toString())
     }
 
     override fun wake() {
         val h = handler ?: return
-        if (queuedWake.compareAndSet(false, true)) h.post {
-            queuedWake.set(false)
-            h.removeCallbacks(loop)
-            h.post(loop)
+        guardModule({ error -> queuedWake.set(false); controlFailed(error) }) {
+            if (queuedWake.compareAndSet(false, true)) {
+                if (!h.post {
+                    queuedWake.set(false)
+                    h.removeCallbacks(loop)
+                    h.post(loop)
+                }) queuedWake.set(false)
+            }
         }
     }
 
@@ -729,11 +747,9 @@ object ModuleRuntime : FrameworkCallbacks {
     private fun watchCommandDir() {
         if (commandObserver != null || !File(ModuleProtocol.COMMAND_DIR).isDirectory) return
         runCatching {
-            @Suppress("DEPRECATION")
-            val observer = object : FileObserver(ModuleProtocol.COMMAND_DIR, FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) {
-                override fun onEvent(event: Int, path: String?) {
+            val observer = ModuleFileObserver(ModuleProtocol.COMMAND_DIR,
+                FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE, ::controlFailed) { _, path ->
                     if (path?.endsWith(".json") == true) wake()
-                }
             }
             observer.startWatching()
             commandObserver = observer
@@ -747,20 +763,19 @@ object ModuleRuntime : FrameworkCallbacks {
         // Cancel native stop tickets as soon as root replaces config or creates a pause marker.
         // The callback changes memory only. Resume still needs the worker's full marker check.
         if (controlObserver == null && File(ModuleProtocol.DIR).isDirectory) runCatching {
-            @Suppress("DEPRECATION")
-            val observer = object : FileObserver(ModuleProtocol.DIR, FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.DELETE or FileObserver.MOVED_FROM or FileObserver.CLOSE_WRITE) {
-                override fun onEvent(event: Int, path: String?) {
+            val observer = ModuleFileObserver(ModuleProtocol.DIR,
+                FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.DELETE or FileObserver.MOVED_FROM or FileObserver.CLOSE_WRITE,
+                ::controlFailed) { event, path ->
                     if (path == "config.json") { configDirty = true; ready = false; wake() }
                     if (path == "commands") wake()
                     if (path == "paused" || path == "emergency_disabled") {
-                        if (event and (CREATE or MOVED_TO or CLOSE_WRITE) != 0) {
+                        if (event and (FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) != 0) {
                             paused = true
                             policy.pause(true, now())
                         }
                         ready = false
                         wake()
                     }
-                }
             }
             observer.startWatching()
             controlObserver = observer
@@ -819,7 +834,7 @@ object ModuleRuntime : FrameworkCallbacks {
             val userClass = android.os.UserHandle::class.java
             val all = userClass.getField("ALL").get(null)
             manager.javaClass.getMethod("addOnRoleHoldersChangedListenerAsUser", java.util.concurrent.Executor::class.java, type, userClass)
-                .invoke(manager, java.util.concurrent.Executor { it.run() }, observer, all)
+                .invoke(manager, java.util.concurrent.Executor { guardModule(::controlFailed) { it.run() } }, observer, all)
             roleObserver = observer
             roleObserverReady = true
             if (lastError?.startsWith("role_observer:") == true) lastError = null
