@@ -62,6 +62,6 @@ adb shell su -c 'sh /data/adb/stop_card_recovery/disable.sh'
 
 ## 数据与许可证
 
-日志字段限定为包名、事件和原因。日志滚动保留 7 天，并限制容量。诊断信息包含运行状态，分享前请检查内容。
+日志字段包含事件编号、时间、目标包名、事件原因及详情（后台拦截详情可含调用方包名与组件名）。日志滚动保留 7 天，并限制容量。诊断信息包含运行状态，分享前请检查内容。
 
 由 [4oOkSk](https://github.com/4oOkSk) 维护，基于 [burakgon/stop 的固定提交](https://github.com/burakgon/stop/tree/51c6b61c1988750821edeb36e05831726bcb1f24)。项目使用 [GPL-3.0 许可证](LICENSE)。独立包名为 `io.github.user4ooksk.stopcard`。
