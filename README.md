@@ -4,12 +4,11 @@
 
 正常页面跳转交给 Android。用户划掉最后一张卡片后，Stop Card 检查其他保护条件；保护全部结束后，模块调用 Android 的强行停止功能。停止处理由用户划卡或手动停止触发。
 
-[下载 APK](https://github.com/4oOkSk/stop-card/releases) · [运行规则](docs/design.md) · [构建说明](docs/build.md) · [设备验收](docs/device-tests.md)
+[下载 APK](https://github.com/4oOkSk/stop-card/releases) · [运行规则](docs/design.md) · [构建与设备验收](docs/build.md)
 
 ## 使用前确认
 
-- 当前源码版本为 **0.4.4 开发预发布**，适配目标为 Android 17。
-- 安装要求为 Android 17（API 37）或更高版本。更高版本仍需单独验证。
+- 适配目标为 Android 17（API 37）或更高版本，版本发布信息见 Releases。更高版本仍需单独验证。
 - 需要 Root、Zygisk，以及兼容目标系统的 LSPosed 或 Vector。
 - 管理范围限定为主用户。
 

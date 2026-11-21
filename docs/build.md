@@ -1,72 +1,43 @@
-# 构建与发布
+# 构建、发布与设备验收
 
-[返回首页](../README.md) · [运行规则](design.md) · [设备验收](device-tests.md)
+[返回首页](../README.md) · [运行规则](design.md)
 
-## 准备工具链
+## 工具链与签名
 
-需要 JDK 21、Android SDK 37 和 Build Tools 37。使用仓库自带的 Gradle Wrapper。
-
-版本定义见 [app/build.gradle.kts](../app/build.gradle.kts)。依赖版本见 [libs.versions.toml](../gradle/libs.versions.toml)。
-
-安装 SDK：
-
-```sh
-sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
-```
-
-如果平台目录名是 `android-37.0`，且 `android-37` 路径空缺，创建兼容链接：
-
-```sh
-ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
-```
-
-## 配置签名
-
-1. 准备自己的签名密钥，并保存备份。
-2. 将 [keystore.properties.example](../keystore.properties.example) 复制为仓库根目录下的 `keystore.properties`。
-3. 填写密钥路径、别名和密码。
-4. 密钥与填写后的配置文件仅保存在受限本地目录。
-
-构建会把签名证书摘要写入模块。模块用该摘要核验管理 APK。可信签名配置缺失时，模块只观察。
-
-用于安装验收的 release APK 必须签名。覆盖安装要求与已安装版本使用相同签名；自建密钥签名的包使用独立安装环境。
+- 依赖与版本定义见 [app/build.gradle.kts](../app/build.gradle.kts) 与 [gradle/libs.versions.toml](../gradle/libs.versions.toml)；使用仓库自带 Gradle Wrapper（JDK 21、Android SDK 37 / Build Tools 37）。
+- **SDK 路径坑点**：若安装的平台目录名为 `android-37.0` 且缺少 `android-37`，创建兼容软链 `ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"`。
+- **签名强制校验**：复制 [keystore.properties.example](../keystore.properties.example) 为受限本地 `keystore.properties`。**构建会把签名证书摘要写入模块用于核验管理 APK，缺失或不匹配时控制通道无法就绪（模块仅观察）**；覆盖安装须同签名。
 
 ## 构建与检查
 
-执行单元测试，并构建发布包和测试包：
-
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleRelease :testbed:assembleDebug
+apksigner verify --verbose --print-certs <release-apk>
 ```
 
-输出位置：
+发布前核对提交、APK SHA-256、签名摘要，清除私有路径与设备信息，附带 `SHA256SUMS.txt` 与 `build-info.txt`；若更换签名须在发布说明提醒卸载旧包会清除设置。
 
-| 内容 | 目录 |
+## 设备验收
+
+按改动涉及的系统入口选择项目，复用同制品/同环境的有效结果，未测项记“待验证”，环境缺失能力记“能力缺失”。
+
+### 验收前置红线
+
+1. **先确认独立停用可用**：安装恢复辅助或写入紧急停用标记后，在测试机确认独立执行能写入停用标记并锁定暂停，再按界面恢复进入观察模式，然后做故障测试。
+2. **严格按顺序验证**：先**暂停模块**记录 Android 原生行为 → 再开**观察模式** → 最后切**执行模式**。
+3. 安装专用测试包 A/B/C（`io.github.user4ooksk.stopcard.test.{a,b,c}`，仅用于测试机），查看日志：`adb logcat -v monotonic -s StopCardFixture AndroidRuntime ActivityManager`。
+
+### 核心验证矩阵
+
+| 场景 | 通过判据 |
 |---|---|
-| 主应用 APK | `app/build/outputs/apk/release/` |
-| A、B、C 测试 APK | `testbed/build/outputs/apk/` |
-| 单元测试报告 | `app/build/reports/tests/testDebugUnitTest/` |
+| 模块就绪与签名 | APK 校验匹配，状态 PID 与当前 `system_server` 一致、心跳更新、`ready=true`、配置代次同步 |
+| 界面与例外 | 批量添加/撤销仅还原本次改动且保留后续单改；卸载重装后旧例外与撤销失效 |
+| 卡片与强停 | 多文档卡逐张递减，仅移除最后一张且其它保护结束才强停（进程退出且 `stopped`）；划卡重开/暂停使旧停止失效；分屏/气泡退出不破坏 `task_remove` 钩子 |
+| 跨应用与桌面入口 | A→B→C 跳转与返回、第三方安装器安装后 Open、延迟后台启动遵循原生规则；服务/绑定销毁后释放保护 |
+| 桌面小组件 | 无卡时保持 `app_widget` 保护与刷新；移除小组件并完成删除回调后撤销保护并复核 |
+| 后台入口与进程创建 | 未被强停的目标允许正常后台；已被强停且无保护的目标拦截已知后台 Service/广播/通知/进程创建，可见页面与共享 UID 正常放行 |
+| 额外保活 | 仅调整预算内有卡缓存进程 `oom_score_adj`；暂停/观察/撤销或内存紧张时恢复系统原生分值 |
+| 重启、恢复与长跑 | 重启后历史卡片待激活；紧急停用生效且重启跳过挂钩；签名/状态读取失败暂停管控；24–48 小时无异常泄漏 |
 
-测试通过后，使用 SDK 中的 `apksigner verify --verbose --print-certs` 检查 APK 签名。再按[设备验收](device-tests.md)检查受本次修改影响的功能。
-
-## 发布
-
-1. 确认版本号、版本代码和 Git 提交。
-2. 确认 APK 来自该源码，记录 APK 的 SHA-256。
-3. 记录签名证书摘要、工具链和已执行的测试。
-4. 检查源码、附件和发布说明，移除私人路径、设备信息和凭据。
-5. 创建版本标签，并发布 APK、`SHA256SUMS.txt` 和 `build-info.txt`。
-6. 下载发布附件，核对文件和校验值。
-
-发布说明只写本版改动、实际验证范围和升级步骤。签名变化时，明确说明是否需要卸载旧包。卸载会清除应用设置。
-
-## 源码目录
-
-| 目录 | 内容 |
-|---|---|
-| `app/src/main/java/io/github/user4ooksk/stopcard/policy/` | 许可与强停决策规则。 |
-| `app/src/main/java/io/github/user4ooksk/stopcard/module/` | 系统适配、状态和执行。 |
-| `app/src/main/java/io/github/user4ooksk/stopcard/bridge/` | Root 通信与恢复安装。 |
-| `app/src/main/java/io/github/user4ooksk/stopcard/ui/` | 管理界面。 |
-| `app/src/test/` | 离线单元测试。 |
-| `testbed/` | 可控测试应用。 |
+**收尾**：恢复测试前设置与 VPN，移除本次创建的测试卡片与小组件，**卸载 A/B/C 测试包**，清理设备临时脚本与诊断副本，确认模块仍就绪；公开报告仅含脱敏摘要。
